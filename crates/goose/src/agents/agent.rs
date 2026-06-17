@@ -593,8 +593,21 @@ impl Agent {
             provider,
         )));
 
-        // Add repetition inspector (lower priority - basic repetition checking)
-        tool_inspection_manager.add_inspector(Box::new(RepetitionInspector::new(None)));
+        // Add repetition inspector (lower priority - basic repetition checking).
+        //
+        // This guards against runaway tool-call loops — e.g. an `edit` that
+        // fails and is retried with the same arguments over and over, which
+        // GOOSE_MAX_TURNS is too coarse to catch early (a healthy long session
+        // can out-run a stuck one in raw turn count). The limit is read from the
+        // GOOSE_MAX_TOOL_REPETITIONS config param so it can be tuned per user
+        // and works in both the CLI and the desktop/UI app. When the param is
+        // unset, the inspector is disabled (None) and behaves exactly as before.
+        let max_tool_repetitions = Config::global()
+            .get_param::<u32>("GOOSE_MAX_TOOL_REPETITIONS")
+            .ok();
+        tool_inspection_manager.add_inspector(Box::new(RepetitionInspector::new(
+            max_tool_repetitions,
+        )));
 
         tool_inspection_manager
     }

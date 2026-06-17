@@ -133,3 +133,138 @@ impl ToolInspector for RepetitionInspector {
         Ok(results)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::conversation::message::ToolRequest;
+    use rmcp::model::CallToolRequestParams;
+    use rmcp::object;
+
+    /// Builds a `ToolRequest` whose tool_call is an identical-looking `edit`
+    /// against the same file — the exact shape of the runaway edit/write loop
+    /// this inspector exists to stop.
+    fn make_edit_request(request_id: &str, target_path: &str) -> ToolRequest {
+        ToolRequest {
+            id: request_id.to_string(),
+            tool_call: Ok(CallToolRequestParams::new("developer__text_editor")
+                .with_arguments(object!({
+                    "command": "str_replace",
+                    "path": target_path,
+                    "old_str": "fn foo() {}",
+                    "new_str": "fn foo() { bar(); }"
+                }))),
+            metadata: None,
+            tool_meta: None,
+        }
+    }
+
+    /// When no limit is configured, the inspector must never deny — it should
+    /// behave exactly as the pre-existing `RepetitionInspector::new(None)` did.
+    #[tokio::test]
+    async fn disabled_inspector_allows_unlimited_identical_calls() {
+        let inspector = RepetitionInspector::new(None);
+        let identical_request = make_edit_request("req-1", "/src/Foo.kt");
+
+        for _attempt in 0..50 {
+            let results = inspector
+                .inspect(
+                    "test-session",
+                    std::slice::from_ref(&identical_request),
+                    &[],
+                    GooseMode::Auto,
+                )
+                .await
+                .expect("inspection should not error");
+
+            assert!(
+                results.is_empty(),
+                "a disabled inspector must produce no findings, even for repeated identical calls"
+            );
+        }
+    }
+
+    /// With a limit of 3, repeating the *same* edit must be denied once the
+    /// consecutive count exceeds the limit. We drive the inspector's real
+    /// counting state via `check_tool_call` (the same method `inspect` uses).
+    #[test]
+    fn identical_calls_are_denied_once_the_limit_is_exceeded() {
+        let mut inspector = RepetitionInspector::new(Some(3));
+        let repeated_call = CallToolRequestParams::new("developer__text_editor")
+            .with_arguments(object!({
+                "command": "str_replace",
+                "path": "/src/Foo.kt",
+                "old_str": "a",
+                "new_str": "b"
+            }));
+
+        // Attempts 1..=3 are within the limit and must be allowed.
+        for attempt in 1..=3 {
+            assert!(
+                inspector.check_tool_call(repeated_call.clone()),
+                "attempt {attempt} should be allowed (<= limit of 3)"
+            );
+        }
+
+        // The 4th identical attempt exceeds the limit and must be denied.
+        assert!(
+            !inspector.check_tool_call(repeated_call.clone()),
+            "the 4th consecutive identical call must be denied (> limit of 3)"
+        );
+    }
+
+    /// A different tool call between repeats resets the consecutive counter, so
+    /// legitimate interleaved work is never falsely blocked.
+    #[test]
+    fn a_different_call_resets_the_consecutive_counter() {
+        let mut inspector = RepetitionInspector::new(Some(2));
+        let edit_call = CallToolRequestParams::new("developer__text_editor")
+            .with_arguments(object!({"command": "str_replace", "path": "/src/Foo.kt"}));
+        let read_call = CallToolRequestParams::new("developer__text_editor")
+            .with_arguments(object!({"command": "view", "path": "/src/Foo.kt"}));
+
+        // Two identical edits — still within the limit of 2.
+        assert!(inspector.check_tool_call(edit_call.clone()));
+        assert!(inspector.check_tool_call(edit_call.clone()));
+
+        // A genuinely different call (a read) breaks the streak and resets.
+        assert!(inspector.check_tool_call(read_call.clone()));
+
+        // Now two more identical edits are again allowed because the counter
+        // was reset — proving interleaved work is not penalized.
+        assert!(inspector.check_tool_call(edit_call.clone()));
+        assert!(inspector.check_tool_call(edit_call.clone()));
+    }
+
+    /// End-to-end through the `ToolInspector::inspect` trait method: once the
+    /// limit is exceeded, the inspector emits a Deny finding tagged "repetition".
+    #[tokio::test]
+    async fn inspect_emits_a_deny_finding_when_limit_exceeded() {
+        let mut inspector = RepetitionInspector::new(Some(2));
+        let request = make_edit_request("req-loop", "/src/DashboardRepository.kt");
+
+        // Prime the inspector's internal counter past the limit using the same
+        // call signature the request carries, so the next `inspect` denies it.
+        let primed_call = request
+            .tool_call
+            .clone()
+            .expect("test request must hold a valid tool_call");
+        assert!(inspector.check_tool_call(primed_call.clone()));
+        assert!(inspector.check_tool_call(primed_call.clone()));
+
+        let results = inspector
+            .inspect(
+                "test-session",
+                std::slice::from_ref(&request),
+                &[],
+                GooseMode::Auto,
+            )
+            .await
+            .expect("inspection should not error");
+
+        assert_eq!(results.len(), 1, "exactly one finding expected for the looping call");
+        assert_eq!(results[0].action, InspectionAction::Deny);
+        assert_eq!(results[0].inspector_name, "repetition");
+        assert_eq!(results[0].tool_request_id, "req-loop");
+    }
+}
