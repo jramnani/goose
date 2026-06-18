@@ -1,5 +1,5 @@
 use crate::config::GooseMode;
-use crate::conversation::message::{Message, ToolRequest};
+use crate::conversation::message::{Message, MessageContent, ToolRequest};
 use crate::tool_inspection::{InspectionAction, InspectionResult, ToolInspector};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -7,8 +7,7 @@ use rmcp::model::CallToolRequestParams;
 use serde_json::Value;
 use std::collections::HashMap;
 
-// Helper struct for internal tracking
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct InternalToolCall {
     name: String,
     parameters: Value,
@@ -29,6 +28,13 @@ impl InternalToolCall {
         Self { name, parameters }
     }
 }
+
+/// Consecutive malformed (unparseable) tool calls tolerated before denying.
+/// Malformed tool_use blocks are a model-layer failure that few-shot-poisons
+/// the context, so the model repeats the malformation in an unrecoverable loop
+/// (anthropics/claude-code#63604). A small cap allows transient parse errors
+/// while breaking a sustained run so the model can respond in text.
+const MAX_CONSECUTIVE_MALFORMED_TOOL_CALLS: u32 = 3;
 
 #[derive(Debug)]
 pub struct RepetitionInspector {
@@ -84,6 +90,65 @@ impl RepetitionInspector {
         self.repeat_count = 0;
         self.call_counts.clear();
     }
+
+    /// Counts how many times `target` appears within the trailing `window`
+    /// tool calls of history. A windowed count catches *alternating* loops
+    /// (A → B → A → B …, aaif-goose/goose#9640) that the consecutive-only
+    /// `check_tool_call` misses, since its counter resets on any differing call.
+    fn count_in_recent_window(
+        &self,
+        target: &InternalToolCall,
+        history_calls: &[InternalToolCall],
+        window: usize,
+    ) -> u32 {
+        let start = history_calls.len().saturating_sub(window);
+        history_calls[start..]
+            .iter()
+            .filter(|call| call.matches(target))
+            .count() as u32
+    }
+
+    /// Pulls the parsed tool calls out of the conversation history, oldest to
+    /// newest, so `inspect` can scan a recent window for repetition patterns.
+    fn collect_history_tool_calls(messages: &[Message]) -> Vec<InternalToolCall> {
+        messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|content| match content {
+                MessageContent::ToolRequest(tool_request) => tool_request
+                    .tool_call
+                    .as_ref()
+                    .ok()
+                    .map(InternalToolCall::from_tool_call),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Counts the trailing run of malformed (`Err`) tool calls in history. Only
+    /// the trailing run counts: a since-recovered parse error must not keep
+    /// tripping the guard — we care about an ongoing malformed loop.
+    fn count_trailing_malformed_tool_calls(messages: &[Message]) -> u32 {
+        let mut trailing_malformed = 0u32;
+        'outer: for message in messages.iter().rev() {
+            for content in message.content.iter().rev() {
+                match content {
+                    MessageContent::ToolRequest(tool_request) => {
+                        if tool_request.tool_call.is_err() {
+                            trailing_malformed += 1;
+                        } else {
+                            // A well-formed call ends the trailing run.
+                            break 'outer;
+                        }
+                    }
+                    // Non-tool content (text/thinking) is ignored; it neither
+                    // extends nor breaks the malformed run.
+                    _ => {}
+                }
+            }
+        }
+        trailing_malformed
+    }
 }
 
 #[async_trait]
@@ -100,27 +165,61 @@ impl ToolInspector for RepetitionInspector {
         &self,
         _session_id: &str,
         tool_requests: &[ToolRequest],
-        _messages: &[Message],
+        messages: &[Message],
         _goose_mode: GooseMode,
     ) -> Result<Vec<InspectionResult>> {
         let mut results = Vec::new();
 
-        // Check repetition limits for each tool request
-        for tool_request in tool_requests {
-            if let Ok(tool_call) = &tool_request.tool_call {
-                // Create a temporary clone to check without modifying state
-                let mut temp_inspector = RepetitionInspector::new(self.max_repetitions);
-                temp_inspector.last_call = self.last_call.clone();
-                temp_inspector.repeat_count = self.repeat_count;
-                temp_inspector.call_counts = self.call_counts.clone();
+        // Disabled when no limit is configured: behave as a no-op.
+        let max_repetitions = match self.max_repetitions {
+            Some(limit) => limit,
+            None => return Ok(results),
+        };
 
-                if !temp_inspector.check_tool_call(tool_call.clone()) {
+        // Guard 1 — malformed-tool-call loop (anthropics/claude-code#63604).
+        let trailing_malformed = Self::count_trailing_malformed_tool_calls(messages);
+        if trailing_malformed >= MAX_CONSECUTIVE_MALFORMED_TOOL_CALLS {
+            for tool_request in tool_requests {
+                if tool_request.tool_call.is_err() {
                     results.push(InspectionResult {
                         tool_request_id: tool_request.id.clone(),
                         action: InspectionAction::Deny,
                         reason: format!(
-                            "Tool '{}' has exceeded maximum repetitions",
-                            tool_call.name
+                            "Model emitted {} malformed tool calls in a row; stopping the retry \
+                             loop so it can respond in text.",
+                            trailing_malformed
+                        ),
+                        confidence: 1.0,
+                        inspector_name: "repetition".to_string(),
+                        finding_id: Some("REP-002".to_string()),
+                    });
+                }
+            }
+            if !results.is_empty() {
+                return Ok(results);
+            }
+        }
+
+        // Guard 2 — windowed repetition, catching consecutive and alternating
+        // loops. Window of 2 * max_repetitions keeps the scan bounded.
+        let window = (max_repetitions as usize).saturating_mul(2);
+        let history_calls = Self::collect_history_tool_calls(messages);
+
+        for tool_request in tool_requests {
+            if let Ok(tool_call) = &tool_request.tool_call {
+                let candidate = InternalToolCall::from_tool_call(tool_call);
+                // +1 for the pending call itself.
+                let occurrences =
+                    self.count_in_recent_window(&candidate, &history_calls, window) + 1;
+
+                if occurrences > max_repetitions {
+                    results.push(InspectionResult {
+                        tool_request_id: tool_request.id.clone(),
+                        action: InspectionAction::Deny,
+                        reason: format!(
+                            "Tool '{}' called with identical arguments {} times in the last {} \
+                             tool calls; denying to break the repetition loop.",
+                            tool_call.name, occurrences, window
                         ),
                         confidence: 1.0,
                         inspector_name: "repetition".to_string(),
@@ -137,126 +236,121 @@ impl ToolInspector for RepetitionInspector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conversation::message::ToolRequest;
-    use rmcp::model::CallToolRequestParams;
+    use crate::conversation::message::{Message, MessageContent, ToolRequest};
+    use rmcp::model::{CallToolRequestParams, ErrorCode, ErrorData};
     use rmcp::object;
 
-    /// Builds a `ToolRequest` whose tool_call is an identical-looking `edit`
-    /// against the same file — the exact shape of the runaway edit/write loop
-    /// this inspector exists to stop.
+    /// Builds a well-formed tool call against the `developer__text_editor`
+    /// tool. The `marker` is embedded in the `path` argument so two calls with
+    /// different markers have genuinely different (name + arguments) signatures
+    /// while sharing the same tool name.
+    fn named_call(tool: &str, marker: &str) -> CallToolRequestParams {
+        CallToolRequestParams::new(tool.to_string()).with_arguments(object!({
+            "command": "str_replace",
+            "path": marker,
+        }))
+    }
+
+    /// Builds a `ToolRequest` carrying a well-formed `developer__text_editor`
+    /// edit against `target_path` — the exact shape of the runaway edit/write
+    /// loop this inspector exists to stop.
     fn make_edit_request(request_id: &str, target_path: &str) -> ToolRequest {
         ToolRequest {
             id: request_id.to_string(),
-            tool_call: Ok(CallToolRequestParams::new("developer__text_editor")
-                .with_arguments(object!({
-                    "command": "str_replace",
-                    "path": target_path,
-                    "old_str": "fn foo() {}",
-                    "new_str": "fn foo() { bar(); }"
-                }))),
+            tool_call: Ok(named_call("developer__text_editor", target_path)),
             metadata: None,
             tool_meta: None,
         }
     }
 
-    /// When no limit is configured, the inspector must never deny — it should
-    /// behave exactly as the pre-existing `RepetitionInspector::new(None)` did.
+    /// Builds a *malformed* pending `ToolRequest`: one whose `tool_call` is the
+    /// `Err` arm because the provider could not parse it into a
+    /// `CallToolRequestParams`.
+    fn make_malformed_request(request_id: &str) -> ToolRequest {
+        ToolRequest {
+            id: request_id.to_string(),
+            tool_call: Err(ErrorData {
+                code: ErrorCode::INVALID_PARAMS,
+                message: std::borrow::Cow::from("malformed"),
+                data: None,
+            }),
+            metadata: None,
+            tool_meta: None,
+        }
+    }
+
+    /// Wraps a sequence of well-formed tool calls into one assistant `Message`
+    /// per call, oldest-to-newest, matching how `inspect` scans history.
+    fn history_from_calls(calls: &[CallToolRequestParams]) -> Vec<Message> {
+        calls
+            .iter()
+            .enumerate()
+            .map(|(index, call)| {
+                Message::assistant().with_tool_request(format!("hist-{index}"), Ok(call.clone()))
+            })
+            .collect()
+    }
+
+    /// Builds a single assistant `Message` carrying one *malformed* tool call,
+    /// used to construct a trailing run of unparseable calls in history.
+    fn malformed_history_message(request_id: &str) -> Message {
+        Message::assistant().with_content(MessageContent::ToolRequest(ToolRequest {
+            id: request_id.to_string(),
+            tool_call: Err(ErrorData {
+                code: ErrorCode::INVALID_PARAMS,
+                message: std::borrow::Cow::from("malformed"),
+                data: None,
+            }),
+            metadata: None,
+            tool_meta: None,
+        }))
+    }
+
+    /// When no limit is configured the inspector is a complete no-op: even an
+    /// enormous history of identical calls plus an identical pending request
+    /// must produce zero findings.
     #[tokio::test]
     async fn disabled_inspector_allows_unlimited_identical_calls() {
         let inspector = RepetitionInspector::new(None);
-        let identical_request = make_edit_request("req-1", "/src/Foo.kt");
-
-        for _attempt in 0..50 {
-            let results = inspector
-                .inspect(
-                    "test-session",
-                    std::slice::from_ref(&identical_request),
-                    &[],
-                    GooseMode::Auto,
-                )
-                .await
-                .expect("inspection should not error");
-
-            assert!(
-                results.is_empty(),
-                "a disabled inspector must produce no findings, even for repeated identical calls"
-            );
-        }
-    }
-
-    /// With a limit of 3, repeating the *same* edit must be denied once the
-    /// consecutive count exceeds the limit. We drive the inspector's real
-    /// counting state via `check_tool_call` (the same method `inspect` uses).
-    #[test]
-    fn identical_calls_are_denied_once_the_limit_is_exceeded() {
-        let mut inspector = RepetitionInspector::new(Some(3));
-        let repeated_call = CallToolRequestParams::new("developer__text_editor")
-            .with_arguments(object!({
-                "command": "str_replace",
-                "path": "/src/Foo.kt",
-                "old_str": "a",
-                "new_str": "b"
-            }));
-
-        // Attempts 1..=3 are within the limit and must be allowed.
-        for attempt in 1..=3 {
-            assert!(
-                inspector.check_tool_call(repeated_call.clone()),
-                "attempt {attempt} should be allowed (<= limit of 3)"
-            );
-        }
-
-        // The 4th identical attempt exceeds the limit and must be denied.
-        assert!(
-            !inspector.check_tool_call(repeated_call.clone()),
-            "the 4th consecutive identical call must be denied (> limit of 3)"
-        );
-    }
-
-    /// A different tool call between repeats resets the consecutive counter, so
-    /// legitimate interleaved work is never falsely blocked.
-    #[test]
-    fn a_different_call_resets_the_consecutive_counter() {
-        let mut inspector = RepetitionInspector::new(Some(2));
-        let edit_call = CallToolRequestParams::new("developer__text_editor")
-            .with_arguments(object!({"command": "str_replace", "path": "/src/Foo.kt"}));
-        let read_call = CallToolRequestParams::new("developer__text_editor")
-            .with_arguments(object!({"command": "view", "path": "/src/Foo.kt"}));
-
-        // Two identical edits — still within the limit of 2.
-        assert!(inspector.check_tool_call(edit_call.clone()));
-        assert!(inspector.check_tool_call(edit_call.clone()));
-
-        // A genuinely different call (a read) breaks the streak and resets.
-        assert!(inspector.check_tool_call(read_call.clone()));
-
-        // Now two more identical edits are again allowed because the counter
-        // was reset — proving interleaved work is not penalized.
-        assert!(inspector.check_tool_call(edit_call.clone()));
-        assert!(inspector.check_tool_call(edit_call.clone()));
-    }
-
-    /// End-to-end through the `ToolInspector::inspect` trait method: once the
-    /// limit is exceeded, the inspector emits a Deny finding tagged "repetition".
-    #[tokio::test]
-    async fn inspect_emits_a_deny_finding_when_limit_exceeded() {
-        let mut inspector = RepetitionInspector::new(Some(2));
-        let request = make_edit_request("req-loop", "/src/DashboardRepository.kt");
-
-        // Prime the inspector's internal counter past the limit using the same
-        // call signature the request carries, so the next `inspect` denies it.
-        let primed_call = request
-            .tool_call
-            .clone()
-            .expect("test request must hold a valid tool_call");
-        assert!(inspector.check_tool_call(primed_call.clone()));
-        assert!(inspector.check_tool_call(primed_call.clone()));
+        let identical_call = named_call("developer__text_editor", "/src/Foo.kt");
+        let history = history_from_calls(&vec![identical_call.clone(); 50]);
+        let pending_request = make_edit_request("req-pending", "/src/Foo.kt");
 
         let results = inspector
             .inspect(
                 "test-session",
-                std::slice::from_ref(&request),
-                &[],
+                std::slice::from_ref(&pending_request),
+                &history,
+                GooseMode::Auto,
+            )
+            .await
+            .expect("inspection should not error");
+
+        assert!(
+            results.is_empty(),
+            "a disabled inspector must produce no findings, even for 50 identical calls"
+        );
+    }
+
+    /// A straight run of identical calls (A, A, A in history) plus one more
+    /// identical pending call exceeds the limit of 3 and must be denied with a
+    /// REP-001 finding.
+    #[tokio::test]
+    async fn consecutive_identical_calls_are_denied_at_the_limit() {
+        let inspector = RepetitionInspector::new(Some(3));
+        let edit_call = named_call("developer__text_editor", "/src/Foo.kt");
+        let history = history_from_calls(&[
+            edit_call.clone(),
+            edit_call.clone(),
+            edit_call.clone(),
+        ]);
+        let pending_request = make_edit_request("req-pending", "/src/Foo.kt");
+
+        let results = inspector
+            .inspect(
+                "test-session",
+                std::slice::from_ref(&pending_request),
+                &history,
                 GooseMode::Auto,
             )
             .await
@@ -265,6 +359,151 @@ mod tests {
         assert_eq!(results.len(), 1, "exactly one finding expected for the looping call");
         assert_eq!(results[0].action, InspectionAction::Deny);
         assert_eq!(results[0].inspector_name, "repetition");
-        assert_eq!(results[0].tool_request_id, "req-loop");
+        assert_eq!(results[0].finding_id.as_deref(), Some("REP-001"));
+        assert_eq!(results[0].tool_request_id, "req-pending");
+    }
+
+    /// An alternating two-tool loop (A, B, A, B, A, B in history) is a loop the
+    /// consecutive-only counter would miss, because no two adjacent calls are
+    /// identical. The windowed guard must still deny the next A with REP-001.
+    /// See aaif-goose/goose#9640.
+    #[tokio::test]
+    async fn alternating_two_tool_loop_is_denied() {
+        let inspector = RepetitionInspector::new(Some(3));
+        // Same tool name, different arguments, so signatures differ.
+        let call_a = named_call("developer__text_editor", "schema.sql");
+        let call_b = named_call("developer__text_editor", ".env");
+        let history = history_from_calls(&[
+            call_a.clone(),
+            call_b.clone(),
+            call_a.clone(),
+            call_b.clone(),
+            call_a.clone(),
+            call_b.clone(),
+        ]);
+        let pending_request = make_edit_request("req-pending", "schema.sql");
+
+        let results = inspector
+            .inspect(
+                "test-session",
+                std::slice::from_ref(&pending_request),
+                &history,
+                GooseMode::Auto,
+            )
+            .await
+            .expect("inspection should not error");
+
+        assert_eq!(results.len(), 1, "the alternating A/B loop must produce one finding");
+        assert_eq!(results[0].action, InspectionAction::Deny);
+        assert_eq!(results[0].inspector_name, "repetition");
+        assert_eq!(results[0].finding_id.as_deref(), Some("REP-001"));
+        assert_eq!(results[0].tool_request_id, "req-pending");
+    }
+
+    /// Calls to the same tool with *different* arguments are legitimate work,
+    /// not a loop. Four distinct markers in history plus a fifth, new marker
+    /// pending must produce no findings.
+    #[tokio::test]
+    async fn varied_arguments_on_the_same_tool_are_allowed() {
+        let inspector = RepetitionInspector::new(Some(3));
+        let history = history_from_calls(&[
+            named_call("developer__text_editor", "/src/A.kt"),
+            named_call("developer__text_editor", "/src/B.kt"),
+            named_call("developer__text_editor", "/src/C.kt"),
+            named_call("developer__text_editor", "/src/D.kt"),
+        ]);
+        let pending_request = make_edit_request("req-pending", "/src/E.kt");
+
+        let results = inspector
+            .inspect(
+                "test-session",
+                std::slice::from_ref(&pending_request),
+                &history,
+                GooseMode::Auto,
+            )
+            .await
+            .expect("inspection should not error");
+
+        assert!(
+            results.is_empty(),
+            "varied arguments on the same tool must not be treated as a repetition loop"
+        );
+    }
+
+    /// A sustained trailing run of malformed (unparseable) tool calls is a
+    /// model-layer failure loop. Three malformed history messages plus a
+    /// malformed pending request must be denied with REP-002.
+    /// See anthropics/claude-code#63604.
+    #[tokio::test]
+    async fn trailing_malformed_tool_calls_are_denied() {
+        let inspector = RepetitionInspector::new(Some(3));
+        let history = vec![
+            malformed_history_message("hist-0"),
+            malformed_history_message("hist-1"),
+            malformed_history_message("hist-2"),
+        ];
+        let pending_request = make_malformed_request("req-malformed");
+
+        let results = inspector
+            .inspect(
+                "test-session",
+                std::slice::from_ref(&pending_request),
+                &history,
+                GooseMode::Auto,
+            )
+            .await
+            .expect("inspection should not error");
+
+        assert_eq!(results.len(), 1, "a sustained malformed run must produce one finding");
+        assert_eq!(results[0].action, InspectionAction::Deny);
+        assert_eq!(results[0].inspector_name, "repetition");
+        assert_eq!(results[0].finding_id.as_deref(), Some("REP-002"));
+        assert_eq!(results[0].tool_request_id, "req-malformed");
+    }
+
+    /// A single, isolated malformed call is a transient parse error, not a
+    /// loop. One malformed history message plus a malformed pending request is
+    /// below the threshold and must be tolerated (no findings).
+    #[tokio::test]
+    async fn an_isolated_malformed_call_is_tolerated() {
+        let inspector = RepetitionInspector::new(Some(3));
+        let history = vec![malformed_history_message("hist-0")];
+        let pending_request = make_malformed_request("req-malformed");
+
+        let results = inspector
+            .inspect(
+                "test-session",
+                std::slice::from_ref(&pending_request),
+                &history,
+                GooseMode::Auto,
+            )
+            .await
+            .expect("inspection should not error");
+
+        assert!(
+            results.is_empty(),
+            "a single transient malformed call must not be denied"
+        );
+    }
+
+    /// The stateful `check_tool_call` tracks *consecutive* identical calls and
+    /// returns `false` once the repeat count exceeds the limit: attempts 1..=3
+    /// are allowed, the 4th is denied.
+    #[test]
+    fn check_tool_call_denies_consecutive_identical_calls() {
+        let mut inspector = RepetitionInspector::new(Some(3));
+        let repeated_call = named_call("developer__text_editor", "/src/Foo.kt");
+
+        for attempt in 1..=3 {
+            assert!(
+                inspector.check_tool_call(repeated_call.clone()),
+                "attempt {attempt} should be allowed (<= limit of 3)"
+            );
+        }
+
+        assert!(
+            !inspector.check_tool_call(repeated_call.clone()),
+            "the 4th consecutive identical call must be denied (> limit of 3)"
+        );
     }
 }
