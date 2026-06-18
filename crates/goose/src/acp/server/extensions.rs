@@ -1,7 +1,9 @@
 use super::*;
 use crate::agents::extension::Envs;
 use crate::config::extensions::ExtensionEntry;
-use agent_client_protocol::schema::{HttpHeader, McpServer, McpServerHttp, McpServerStdio};
+use agent_client_protocol::schema::{
+    EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerStdio,
+};
 
 impl GooseAcpAgent {
     pub(super) async fn on_add_extension(
@@ -172,18 +174,32 @@ fn config_to_goose_extension(
             description,
             cmd,
             args,
+            envs,
             env_keys,
             timeout,
             bundled,
             ..
-        } => GooseExtension::Mcp {
-            server: McpServer::Stdio(McpServerStdio::new(name, cmd).args(args.clone())),
-            env_keys: env_keys.clone(),
-            description: empty_string_to_none(description),
-            timeout: *timeout,
-            socket: None,
-            bundled: *bundled,
-        },
+        } => {
+            // Forward literal `envs` from config.yaml to the ACP client as
+            // `EnvVariable`s on the stdio server. Without this the client (e.g.
+            // the desktop app) only receives `env_keys`, so literal env values
+            // are silently dropped and the spawned stdio subprocess launches
+            // without its configured environment, falling back to its own
+            // defaults.
+            let environment_variables = envs_to_env_variables(envs);
+            GooseExtension::Mcp {
+                server: McpServer::Stdio(
+                    McpServerStdio::new(name, cmd)
+                        .args(args.clone())
+                        .env(environment_variables),
+                ),
+                env_keys: env_keys.clone(),
+                description: empty_string_to_none(description),
+                timeout: *timeout,
+                socket: None,
+                bundled: *bundled,
+            }
+        }
         ExtensionConfig::StreamableHttp {
             name,
             description,
@@ -339,6 +355,19 @@ fn empty_string_to_none(value: &str) -> Option<String> {
     }
 }
 
+/// Convert the literal `envs` map from an `ExtensionConfig` into the ACP
+/// `EnvVariable` list expected on `McpServerStdio`. Sorted by name so the
+/// output is deterministic (the underlying `Envs` map is unordered).
+fn envs_to_env_variables(envs: &Envs) -> Vec<EnvVariable> {
+    let mut environment_variables: Vec<EnvVariable> = envs
+        .get_env()
+        .into_iter()
+        .map(|(name, value)| EnvVariable::new(name, value))
+        .collect();
+    environment_variables.sort_by(|left, right| left.name.cmp(&right.name));
+    environment_variables
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn stdio_config_converts_to_goose_mcp_extension_without_literal_envs() {
+    fn stdio_config_converts_to_goose_mcp_extension_with_literal_envs() {
         let config = ExtensionConfig::Stdio {
             name: "test-stdio".to_string(),
             description: "Test stdio".to_string(),
@@ -456,7 +485,11 @@ mod tests {
         assert_eq!(stdio.name, "test-stdio");
         assert_eq!(stdio.command.to_string_lossy(), "test-command");
         assert_eq!(stdio.args, vec!["--flag", "value"]);
-        assert!(stdio.env.is_empty(), "literal envs should not be exposed");
+        // Literal envs from config.yaml are now forwarded to the ACP client so
+        // they survive the round-trip and reach the spawned stdio subprocess.
+        assert_eq!(stdio.env.len(), 1, "literal envs should be forwarded");
+        assert_eq!(stdio.env[0].name, "SECRET_TOKEN");
+        assert_eq!(stdio.env[0].value, "literal-secret");
     }
 
     #[test]
