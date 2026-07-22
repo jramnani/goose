@@ -232,9 +232,19 @@ const MarkdownCode = memo(
     const match = /language-(\w+)/.exec(className || '');
     const codeContent = String(children ?? '');
 
-    // react-markdown gives untagged fenced blocks no language-xxx className,
-    // so they look like inline code here. Block-level content always ends with
-    // a trailing newline, which inline code spans can never contain.
+    // react-markdown (v10) never sets a `language-xxx` className for fenced code
+    // blocks with no language tag (bare ```) or for 4-space-indented code blocks -
+    // `match` is null for those, same as for genuine inline code like `foo`. Without
+    // an explicit language, the only reliable way to tell "this is a real block of
+    // code" apart from "this is a single-backtick inline code span" is that
+    // block-level code content always ends with a trailing newline added by the
+    // markdown parser, while inline code spans can never contain a literal newline
+    // at all (a soft line break inside inline code collapses to a space per the
+    // CommonMark spec). We use that distinction so untagged/indented blocks still
+    // render through CodeBlock - getting the same readable dark background, sizing,
+    // and copy button as syntax-highlighted blocks - instead of being squeezed into
+    // the small single-line "inline code" badge style, which used to paint a
+    // separate highlighted box on every wrapped line.
     const isBlockLevelCode = !inline && codeContent.endsWith('\n');
 
     return isBlockLevelCode ? (
