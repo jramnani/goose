@@ -173,8 +173,25 @@ const MarkdownCode = memo(
     ref: React.Ref<HTMLElement>
   ) {
     const match = /language-(\w+)/.exec(className || '');
-    return !inline && match ? (
-      <CodeBlock language={match[1]}>{String(children).replace(/\n$/, '')}</CodeBlock>
+    const codeContent = String(children ?? '');
+
+    // react-markdown (v10) never sets a `language-xxx` className for fenced code
+    // blocks with no language tag (bare ```) or for 4-space-indented code blocks -
+    // `match` is null for those, same as for genuine inline code like `foo`. Without
+    // an explicit language, the only reliable way to tell "this is a real block of
+    // code" apart from "this is a single-backtick inline code span" is that
+    // block-level code content always ends with a trailing newline added by the
+    // markdown parser, while inline code spans can never contain a literal newline
+    // at all (a soft line break inside inline code collapses to a space per the
+    // CommonMark spec). We use that distinction so untagged/indented blocks still
+    // render through CodeBlock - getting the same readable dark background, sizing,
+    // and copy button as syntax-highlighted blocks - instead of being squeezed into
+    // the small single-line "inline code" badge style, which used to paint a
+    // separate highlighted box on every wrapped line.
+    const isBlockLevelCode = !inline && codeContent.endsWith('\n');
+
+    return isBlockLevelCode ? (
+      <CodeBlock language={match ? match[1] : 'text'}>{codeContent.replace(/\n$/, '')}</CodeBlock>
     ) : (
       <code ref={ref} {...props} className="break-all bg-inline-code whitespace-pre-wrap font-mono">
         {children}
@@ -302,7 +319,9 @@ const MarkdownContent = memo(function MarkdownContent({
       <ConfirmationModal
         isOpen={pendingLink !== null}
         title={intl.formatMessage(i18n.openExternalLink)}
-        message={intl.formatMessage(i18n.openProtocolLink, { protocol: pendingLink?.protocol ?? '' })}
+        message={intl.formatMessage(i18n.openProtocolLink, {
+          protocol: pendingLink?.protocol ?? '',
+        })}
         detail={intl.formatMessage(i18n.thisWillOpen, { href: pendingLink?.href ?? '' })}
         onConfirm={handleConfirmOpen}
         onCancel={handleCancelOpen}

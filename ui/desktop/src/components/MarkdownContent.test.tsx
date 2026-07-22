@@ -172,6 +172,59 @@ console.log('Hello, World!');
         expect(screen.getByText('console.log()')).toBeInTheDocument();
       });
     });
+
+    it('renders untagged fenced code blocks (no language) through the same CodeBlock component as tagged blocks', async () => {
+      // Regression test: fenced code blocks with no language tag (bare ```)
+      // have no `language-xxx` class for MarkdownCode to match against. It used
+      // to treat that the same as genuine single-word inline code (`` `foo` ``)
+      // and render it via the small "inline code" badge style. Because that
+      // <code> element is `display: inline`, rendering multi-line content
+      // through it painted a separate highlighted background box on every
+      // line instead of one continuous, readable block - and it never got the
+      // hover "copy" button that tagged code blocks have.
+      //
+      // MarkdownCode now distinguishes real block-level code from inline code
+      // by checking for a trailing newline (block-level code content always
+      // ends in one; inline code spans never contain a literal newline at
+      // all), so untagged blocks route through CodeBlock just like tagged
+      // ones. This test asserts that routing: one <pre>, one <code> with all
+      // lines intact, and a copy button - matching tagged-block behavior.
+      const multiLinePipelineStatus = [
+        'Spec pipeline for CIMS-1059',
+        '',
+        '  1. create      — create spec from Jira ticket or description',
+        '  2. review      — self-review or co-review AC with QA',
+        '',
+        'Current phase: — (not started)',
+        'Suggested next: create',
+      ].join('\n');
+      const content = ['```', multiLinePipelineStatus, '```'].join('\n');
+
+      const { container } = renderWithIntl(<MarkdownContent content={content} />);
+
+      await waitFor(() => {
+        expect(screen.getByText(/Spec pipeline for CIMS-1059/)).toBeInTheDocument();
+      });
+
+      // There should be exactly one <pre> element wrapping exactly one <code>
+      // element that contains the entire multi-line block as a single node,
+      // rather than one <code>/<pre> pairing per line.
+      const preElements = container.querySelectorAll('pre');
+      expect(preElements).toHaveLength(1);
+
+      const codeElementsInsidePre = preElements[0].querySelectorAll('code');
+      expect(codeElementsInsidePre).toHaveLength(1);
+      expect(codeElementsInsidePre[0].textContent).toContain('Current phase: — (not started)');
+      expect(codeElementsInsidePre[0].textContent).toContain('Suggested next: create');
+
+      // The block should NOT use the small single-line "inline code" badge
+      // style - that would indicate the bug regressed.
+      expect(codeElementsInsidePre[0].className).not.toContain('bg-inline-code');
+
+      // It should get the same hover "copy" button that tagged code blocks
+      // get, since it now renders through the shared CodeBlock component.
+      expect(preElements[0].querySelector('[data-testid="copy-icon"]')).toBeInTheDocument();
+    });
   });
 
   describe('Markdown Features', () => {
