@@ -228,9 +228,34 @@ function stop(sessionId: string): void {
     acpChatSessionActions.startPromptCancellation(sessionId, storedPromptAttemptId);
     cancelAcpPermissionRequestsForSession(sessionId);
     cancelAcpElicitationRequestsForSession(sessionId);
-    acpCancelPrompt(sessionId).catch((error) => {
-      console.warn('Failed to cancel ACP prompt:', error);
-    });
+
+    // After sending cancel, the original prompt should resolve quickly.
+    // If it doesn't (e.g. slow LLM response, network issues), force-clear
+    // so the user can resume chatting without refreshing the page.
+    let cancellationFallbackApplied = false;
+    const forceClear = () => {
+      if (cancellationFallbackApplied) return;
+      cancellationFallbackApplied = true;
+      acpChatSessionActions.clearPromptCancellation(sessionId, storedPromptAttemptId);
+    };
+
+    // Fallback 1: cancel notification failed to send
+    acpCancelPrompt(sessionId)
+      .then(() => {
+        // Fallback 2: cancel was sent but prompt didn't resolve within 5s
+        setTimeout(forceClear, 5_000);
+      })
+      .catch((error) => {
+        console.warn('Failed to cancel ACP prompt:', error);
+        forceClear();
+      });
+
+    // If the prompt resolves naturally, cancel both fallbacks
+    void acpChatSessionActions
+      .waitForPromptCancellation(sessionId, storedPromptAttemptId)
+      .then(() => {
+        cancellationFallbackApplied = true;
+      });
     return;
   }
 
