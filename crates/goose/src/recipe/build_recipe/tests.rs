@@ -2,7 +2,7 @@ use crate::recipe::build_recipe::{
     build_recipe_from_template, resolve_sub_recipe_path, RecipeError,
 };
 use crate::recipe::read_recipe_file_content::RecipeFile;
-use crate::recipe::{RecipeParameterInputType, RecipeParameterRequirement};
+
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -107,15 +107,10 @@ fn test_build_recipe_from_template_success() {
     assert_eq!(recipe.title, "Test Recipe");
     assert_eq!(recipe.description, "A test recipe");
     assert_eq!(recipe.instructions.unwrap(), "Test instructions with value");
-    assert_eq!(recipe.parameters.as_ref().unwrap().len(), 1);
-    let param = &recipe.parameters.as_ref().unwrap()[0];
-    assert_eq!(param.key, "my_name");
-    assert!(matches!(param.input_type, RecipeParameterInputType::String));
-    assert!(matches!(
-        param.requirement,
-        RecipeParameterRequirement::Required
-    ));
-    assert_eq!(param.description, "A test parameter");
+    assert!(
+        recipe.parameters.is_none(),
+        "parameters should be stripped after rendering"
+    );
 }
 
 #[test]
@@ -142,14 +137,10 @@ fn test_build_recipe_from_template_success_variable_in_prompt() {
     assert_eq!(recipe.description, "A test recipe");
     assert_eq!(recipe.instructions.unwrap(), "Test instructions");
     assert_eq!(recipe.prompt.unwrap(), "My prompt value");
-    let param = &recipe.parameters.as_ref().unwrap()[0];
-    assert_eq!(param.key, "my_name");
-    assert!(matches!(param.input_type, RecipeParameterInputType::String));
-    assert!(matches!(
-        param.requirement,
-        RecipeParameterRequirement::Required
-    ));
-    assert_eq!(param.description, "A test parameter");
+    assert!(
+        recipe.parameters.is_none(),
+        "parameters should be stripped after rendering"
+    );
 }
 
 #[test]
@@ -413,11 +404,9 @@ fn test_template_inheritance() {
             parent_recipe.prompt.unwrap(),
             "show me the news for day: today\nWhat is the capital of France?\n\n    Feature is enabled.\n"
         );
-    assert_eq!(parent_recipe.parameters.as_ref().unwrap().len(), 2);
-    assert_eq!(parent_recipe.parameters.as_ref().unwrap()[0].key, "date");
-    assert_eq!(
-        parent_recipe.parameters.as_ref().unwrap()[1].key,
-        "is_enabled"
+    assert!(
+        parent_recipe.parameters.is_none(),
+        "parameters should be stripped after rendering"
     );
 
     let child_recipe = build_recipe_from_template(
@@ -433,11 +422,9 @@ fn test_template_inheritance() {
             child_recipe.prompt.unwrap().trim(),
             "show me the news for day: today\nWhat is the capital of Germany?\n\n    Feature is enabled."
         );
-    assert_eq!(child_recipe.parameters.as_ref().unwrap().len(), 2);
-    assert_eq!(child_recipe.parameters.as_ref().unwrap()[0].key, "date");
-    assert_eq!(
-        child_recipe.parameters.as_ref().unwrap()[1].key,
-        "is_enabled"
+    assert!(
+        child_recipe.parameters.is_none(),
+        "parameters should be stripped after rendering"
     );
 }
 

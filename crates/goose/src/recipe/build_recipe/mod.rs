@@ -67,6 +67,12 @@ where
         }
     }
 
+    // Strip parameters after rendering so the stored snapshot does not fail
+    // re-validation in Goose Desktop. Rendered content no longer contains
+    // template variables, so any remaining parameter definitions would be
+    // flagged as "unnecessary" by validate_parameters_in_template.
+    recipe.parameters = None;
+
     Ok(recipe)
 }
 

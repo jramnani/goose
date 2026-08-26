@@ -37,7 +37,7 @@ vi.mock('../chatSessionStore', () => ({
     startPromptCancellation: vi.fn(),
     clearPromptCancellation: vi.fn(),
     restorePromptCancellation: vi.fn(),
-    waitForPromptCancellation: vi.fn(),
+    waitForPromptCancellation: vi.fn().mockResolvedValue(undefined),
     setChatState: vi.fn(),
     setSessionMetadata: vi.fn(),
     setSessionLoadError: vi.fn(),
