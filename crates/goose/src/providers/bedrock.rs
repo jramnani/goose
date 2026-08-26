@@ -39,7 +39,7 @@ pub(crate) const BEDROCK_PROVIDER_NAME: &str = "aws_bedrock";
 pub const BEDROCK_DOC_LINK: &str =
     "https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html";
 
-pub const BEDROCK_DEFAULT_MODEL: &str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
+pub const BEDROCK_DEFAULT_MODEL: &str = "us.anthropic.claude-sonnet-5";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BedrockEndpoint {
     Converse,
@@ -56,38 +56,26 @@ struct BedrockModelEntry {
 
 const BEDROCK_MODEL_TABLE: &[BedrockModelEntry] = &[
     BedrockModelEntry {
+        name: "us.anthropic.claude-sonnet-5",
+        wire_model_id: "us.anthropic.claude-sonnet-5",
+        endpoint: BedrockEndpoint::Converse,
+        context_limit: None,
+    },
+    BedrockModelEntry {
+        name: "us.anthropic.claude-fable-5",
+        wire_model_id: "us.anthropic.claude-fable-5",
+        endpoint: BedrockEndpoint::Converse,
+        context_limit: None,
+    },
+    BedrockModelEntry {
+        name: "us.anthropic.claude-opus-4-8",
+        wire_model_id: "us.anthropic.claude-opus-4-8",
+        endpoint: BedrockEndpoint::Converse,
+        context_limit: None,
+    },
+    BedrockModelEntry {
         name: "global.anthropic.claude-sonnet-5",
         wire_model_id: "global.anthropic.claude-sonnet-5",
-        endpoint: BedrockEndpoint::Converse,
-        context_limit: None,
-    },
-    BedrockModelEntry {
-        name: "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-        wire_model_id: "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-        endpoint: BedrockEndpoint::Converse,
-        context_limit: None,
-    },
-    BedrockModelEntry {
-        name: "us.anthropic.claude-sonnet-4-20250514-v1:0",
-        wire_model_id: "us.anthropic.claude-sonnet-4-20250514-v1:0",
-        endpoint: BedrockEndpoint::Converse,
-        context_limit: None,
-    },
-    BedrockModelEntry {
-        name: "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
-        wire_model_id: "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
-        endpoint: BedrockEndpoint::Converse,
-        context_limit: None,
-    },
-    BedrockModelEntry {
-        name: "us.anthropic.claude-opus-4-20250514-v1:0",
-        wire_model_id: "us.anthropic.claude-opus-4-20250514-v1:0",
-        endpoint: BedrockEndpoint::Converse,
-        context_limit: None,
-    },
-    BedrockModelEntry {
-        name: "us.anthropic.claude-opus-4-1-20250805-v1:0",
-        wire_model_id: "us.anthropic.claude-opus-4-1-20250805-v1:0",
         endpoint: BedrockEndpoint::Converse,
         context_limit: None,
     },
@@ -1194,14 +1182,14 @@ mod tests {
     fn stale_reasoning_only_turn_is_removed_and_neighboring_roles_are_merged() {
         use crate::conversation::message::{InferenceMetadata, MessageContent};
 
-        let (provider, model) = create_mock_provider_and_model("anthropic.claude-sonnet-4");
+        let (provider, model) = create_mock_provider_and_model("us.anthropic.claude-sonnet-5");
         let messages = vec![
             Message::user().with_text("first"),
             Message::assistant()
                 .with_content(MessageContent::thinking("internal", "sig-abc"))
                 .with_inference(InferenceMetadata {
                     provider: "aws_bedrock".to_string(),
-                    requested_model: "anthropic.claude-opus-4".to_string(),
+                    requested_model: "us.anthropic.claude-opus-4-8".to_string(),
                     resolved_model: None,
                     provider_session_id: None,
                 }),
@@ -1230,8 +1218,7 @@ mod tests {
     fn test_caching_enabled_for_claude_model() {
         std::env::set_var("BEDROCK_ENABLE_CACHING", "true");
 
-        let (provider, model) =
-            create_mock_provider_and_model("us.anthropic.claude-sonnet-4-5-20250929-v1:0");
+        let (provider, model) = create_mock_provider_and_model("us.anthropic.claude-sonnet-5");
         assert!(
             provider.should_enable_caching(&model),
             "Caching should be enabled for Claude models when BEDROCK_ENABLE_CACHING=true"
@@ -1968,7 +1955,7 @@ mod tests {
     }
     #[test]
     fn test_converse_model_not_mantle() {
-        let entry = find_model_entry("us.anthropic.claude-sonnet-4-5-20250929-v1:0").unwrap();
+        let entry = find_model_entry("us.anthropic.claude-sonnet-5").unwrap();
         assert_eq!(entry.endpoint, BedrockEndpoint::Converse);
     }
 }
