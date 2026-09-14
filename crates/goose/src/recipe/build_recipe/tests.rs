@@ -506,10 +506,10 @@ parameters:
     );
     assert!(!recipe.instructions.as_deref().unwrap().contains(secret));
     assert!(recipe.retry.is_none());
-    assert!(matches!(
-        recipe.parameters.unwrap()[0].input_type,
-        RecipeParameterInputType::String
-    ));
+    assert!(
+        recipe.parameters.is_none(),
+        "parameters should be stripped after rendering"
+    );
 }
 
 #[test]
