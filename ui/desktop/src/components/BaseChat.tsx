@@ -262,7 +262,10 @@ export default function BaseChat({
       return;
     }
 
-    if (sessionId) {
+    // Declining only cleans up a session that was just created for this
+    // recipe and is still empty. A resumed session with history must never be
+    // deleted because the user declined the recipe trust prompt.
+    if (sessionId && messages.length === 0) {
       try {
         await acpDeleteSession(sessionId);
         window.dispatchEvent(new CustomEvent(AppEvents.SESSION_DELETED, { detail: { sessionId } }));
