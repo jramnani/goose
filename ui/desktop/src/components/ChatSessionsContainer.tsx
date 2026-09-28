@@ -5,6 +5,8 @@ import { ChatType } from '../types/chat';
 import { UserInput } from '../types/message';
 import { subscribeToAcpRecovery } from '../acp/acpConnection';
 import { acpChatSessionController } from '../acp/chatSessionController';
+import { acpChatSessionStore } from '../acp/chatSessionStore';
+import { ChatState } from '../types/chatState';
 
 interface ChatSessionsContainerProps {
   setChat: (chat: ChatType) => void;
@@ -44,7 +46,12 @@ export default function ChatSessionsContainer({
         return;
       }
       for (const sessionId of sessionIdsRef.current) {
-        void acpChatSessionController.restoreSession(sessionId);
+        const snapshot = acpChatSessionStore.getSnapshot(sessionId);
+        // Restore only if the session is currently loading (chatState === LoadingConversation) or has a load error, or doesn't exist yet.
+        // Already-loaded sessions (Idle/Streaming with no error) don't need restoration when returning from Settings.
+        if (snapshot === undefined || snapshot.chatState === ChatState.LoadingConversation || snapshot.sessionLoadError !== undefined) {
+          void acpChatSessionController.restoreSession(sessionId);
+        }
       }
     });
   }, []);
