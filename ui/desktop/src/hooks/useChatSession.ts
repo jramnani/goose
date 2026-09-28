@@ -66,6 +66,7 @@ export function useChatSession({
   const chatState = acpSnapshot?.chatState ?? ChatState.LoadingConversation;
   const progressMessage = acpSnapshot?.progressMessage;
   const sessionLoadError = acpSnapshot?.sessionLoadError;
+  const replaySkippedMessages = acpSnapshot?.replaySkippedMessages ?? 0;
   const tokenState = acpSnapshot?.tokenState ?? initialTokenState;
   const queueProcessingBlocked = acpSnapshot?.pendingCancelPromptAttemptId != null;
 
@@ -340,6 +341,7 @@ export function useChatSession({
 
   return {
     sessionLoadError,
+    replaySkippedMessages,
     messages,
     session,
     chatState,

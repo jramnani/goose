@@ -114,6 +114,7 @@ function snapshotWithActivePrompt(activePromptAttemptId: string | null): AcpChat
     activePromptAttemptId,
     activeRunId: activePromptAttemptId ? 'run-1' : null,
     pendingCancelPromptAttemptId: null,
+    replaySkippedMessages: 0,
   };
 }
 
@@ -152,7 +153,8 @@ describe('acpChatSessionController.loadSession', () => {
     expect(acpLoadSession).toHaveBeenCalledWith(SESSION_ID);
     expect(acpChatSessionActions.finishSessionLoad).toHaveBeenCalledWith(
       SESSION_ID,
-      loadedSession()
+      loadedSession(),
+      0
     );
   });
 
@@ -165,7 +167,8 @@ describe('acpChatSessionController.loadSession', () => {
     expect(acpLoadSession).toHaveBeenCalledWith(SESSION_ID);
     expect(acpChatSessionActions.finishSessionLoad).toHaveBeenCalledWith(
       SESSION_ID,
-      loadedSession()
+      loadedSession(),
+      0
     );
   });
 
@@ -196,7 +199,23 @@ describe('acpChatSessionController.loadSession', () => {
     expect(acpLoadSession).toHaveBeenCalledWith(SESSION_ID);
     expect(acpChatSessionActions.finishSessionLoad).toHaveBeenCalledWith(
       SESSION_ID,
-      loadedSession()
+      loadedSession(),
+      0
+    );
+  });
+
+  it('passes the skipped replay count to the session store', async () => {
+    vi.mocked(acpLoadSession).mockResolvedValue({
+      ...mockLoadResult(),
+      meta: { replaySkipped: 271 },
+    });
+
+    await acpChatSessionController.loadSession(SESSION_ID);
+
+    expect(acpChatSessionActions.finishSessionLoad).toHaveBeenCalledWith(
+      SESSION_ID,
+      loadedSession(),
+      271
     );
   });
 });

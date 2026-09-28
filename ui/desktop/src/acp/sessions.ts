@@ -53,6 +53,7 @@ export interface LoadSessionMeta {
   userRecipeValues?: Record<string, string> | null;
   extensionResults?: ExtensionLoadResult[] | null;
   workingDir?: string;
+  replaySkipped?: number;
 }
 
 export interface AcpLoadSessionResult {
@@ -70,6 +71,7 @@ function parseSessionResponseMeta(rawMeta: unknown): LoadSessionMeta {
     userRecipeValues: meta.userRecipeValues,
     extensionResults: meta.extensionResults,
     workingDir: typeof meta.workingDir === 'string' ? meta.workingDir : undefined,
+    replaySkipped: typeof meta.replaySkipped === 'number' ? meta.replaySkipped : undefined,
   };
 }
 
@@ -204,6 +206,12 @@ export function isAcpSessionLoadInFlight(sessionId: string): boolean {
   return inFlightSessionLoads.has(sessionId);
 }
 
+// How many trailing messages to ask the server to replay on session open.
+// The server rounds up to a turn boundary and reports how many older messages
+// it skipped via replaySkipped in the response meta, so long sessions open
+// without replaying their entire history over the wire.
+const REPLAY_TAIL = 200;
+
 async function loadAcpSession(sessionId: string): Promise<AcpLoadSessionResult> {
   const client = await getAcpClient();
   const initialSessionInfoResponse = await client.goose.sessionInfo_unstable({ sessionId });
@@ -212,6 +220,7 @@ async function loadAcpSession(sessionId: string): Promise<AcpLoadSessionResult> 
     sessionId,
     cwd: initialSessionInfo.cwd,
     mcpServers: [],
+    _meta: { replayTail: REPLAY_TAIL },
   });
   // Loading can populate missing provider/model metadata.
   const sessionInfoResponse = await client.goose.sessionInfo_unstable({ sessionId });

@@ -54,6 +54,10 @@ const i18n = defineMessages({
     id: 'baseChat.reconnecting',
     defaultMessage: 'Connection lost. Reconnecting…',
   },
+  earlierMessagesNotShown: {
+    id: 'baseChat.earlierMessagesNotShown',
+    defaultMessage: '… {count} earlier messages not shown',
+  },
 });
 
 const isUserMessage = (message: Message) => message.role === 'user';
@@ -115,6 +119,7 @@ export default function BaseChat({
     stopStreaming,
     retrySessionLoad,
     sessionLoadError,
+    replaySkippedMessages,
     tokenState,
     notifications: toolCallNotifications,
     pauseQueueOnStop,
@@ -471,6 +476,13 @@ export default function BaseChat({
 
             {messages.length > 0 || recipe ? (
               <>
+                {replaySkippedMessages > 0 && (
+                  <div className="text-xs text-text-secondary text-center py-2">
+                    {intl.formatMessage(i18n.earlierMessagesNotShown, {
+                      count: replaySkippedMessages,
+                    })}
+                  </div>
+                )}
                 <SearchView>
                   <ProgressiveMessageList
                     messages={messages}

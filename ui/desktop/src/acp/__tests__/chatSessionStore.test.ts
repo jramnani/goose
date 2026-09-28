@@ -207,6 +207,22 @@ describe('acpChatSessionStore', () => {
     expect(snapshot.sessionLoadError).toBeUndefined();
   });
 
+  it('records skipped replay messages and clears them on the next load', () => {
+    const currentSessionId = sessionId('session-1');
+
+    const snapshot = acpChatSessionActions.finishSessionLoad(
+      currentSessionId,
+      session(currentSessionId),
+      271
+    );
+
+    expect(snapshot.replaySkippedMessages).toBe(271);
+
+    acpChatSessionActions.startSessionLoad(currentSessionId);
+
+    expect(acpChatSessionStore.getSnapshot(currentSessionId)?.replaySkippedMessages).toBe(0);
+  });
+
   it('keeps multiple session snapshots isolated', () => {
     const firstSessionId = sessionId('session-1');
     const secondSessionId = sessionId('session-2');

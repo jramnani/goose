@@ -161,7 +161,11 @@ async function loadSessionFromServer(
     window.dispatchEvent(
       new CustomEvent(AppEvents.SESSION_EXTENSIONS_LOADED, { detail: { sessionId } })
     );
-    acpChatSessionActions.finishSessionLoad(sessionId, sessionInfoToSession(sessionInfo, meta));
+    acpChatSessionActions.finishSessionLoad(
+      sessionId,
+      sessionInfoToSession(sessionInfo, meta),
+      meta.replaySkipped ?? 0
+    );
     options.onSessionLoaded?.();
   } catch (error) {
     console.error('Failed to load ACP session:', error);
