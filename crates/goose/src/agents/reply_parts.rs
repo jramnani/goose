@@ -188,9 +188,15 @@ pub(crate) fn prepare_inference_tools(
     #[cfg(feature = "code-mode")]
     if code_execution_active {
         tools.retain(|tool| {
-            crate::agents::extension_manager::get_tool_owner(tool).is_some_and(|owner| {
-                crate::agents::extension_manager::is_first_class_extension(&owner)
-            }) || crate::agents::extension_manager::get_tool_resource_uri(tool).is_some()
+            match crate::agents::extension_manager::get_tool_owner(tool) {
+                // Builtin tools have no extension owner, so progressive search
+                // cannot rediscover them; they must stay advertised.
+                None => true,
+                Some(owner) => {
+                    crate::agents::extension_manager::is_first_class_extension(&owner)
+                        || crate::agents::extension_manager::get_tool_resource_uri(tool).is_some()
+                }
+            }
         });
     }
 
@@ -1455,7 +1461,7 @@ mod tests {
     }
     #[cfg(feature = "code-mode")]
     #[test]
-    fn code_mode_keeps_first_class_and_resource_tools() {
+    fn code_mode_keeps_first_class_resource_and_builtin_tools() {
         let mut first_class =
             make_tool_with_meta(Some(serde_json::json!({"goose_extension": "developer"})));
         first_class.name = "shell".into();
@@ -1463,16 +1469,22 @@ mod tests {
             serde_json::json!({"ui": {"resourceUri": "ui://example"}}),
         ));
         resource.name = "resource__view".into();
-        let ordinary = make_tool_with_meta(None);
+        let mut non_first_class =
+            make_tool_with_meta(Some(serde_json::json!({"goose_extension": "calculator"})));
+        non_first_class.name = "calc__add".into();
+        let builtin = make_tool_with_meta(None);
         let hidden = make_tool_with_meta(Some(
             serde_json::json!({"goose_extension": "developer", "ui": {"visibility": ["app"]}}),
         ));
-        let filtered = prepare_inference_tools(vec![ordinary, first_class, resource, hidden], true);
+        let filtered = prepare_inference_tools(
+            vec![non_first_class, first_class, resource, builtin, hidden],
+            true,
+        );
         let names = filtered
             .iter()
             .map(|tool| tool.name.as_ref())
             .collect::<Vec<_>>();
-        assert_eq!(names, ["resource__view", "shell"]);
+        assert_eq!(names, ["resource__view", "shell", "test_tool"]);
     }
 }
 

@@ -1,6 +1,8 @@
 use anyhow::Result;
 use serde_json::json;
 
+#[cfg(feature = "code-mode")]
+use super::calculator_extension::{value, ADD};
 #[cfg(feature = "scheduler")]
 use super::dummy_api::DummyApi;
 use super::dummy_api::ProviderFeatures;
@@ -335,6 +337,76 @@ async fn final_output_beside_delegate_is_not_shown_before_the_subagent_runs() ->
     Ok(())
 }
 
+#[cfg(feature = "code-mode")]
+#[tokio::test]
+async fn code_mode_subagent_completes_structured_delegation() -> Result<()> {
+    let (pipeline, api) = test_pipeline().await?;
+    let pipeline = pipeline.with_max_turns(2);
+    let host = api.uri();
+    let _guard = env_lock::lock_env([
+        ("OPENAI_API_KEY", Some("fake-openai-no-keyring")),
+        ("OPENAI_HOST", Some(host.as_str())),
+        ("OPENAI_BASE_PATH", Some("chat/completions")),
+        ("OPENAI_CUSTOM_HEADERS", Some("")),
+    ]);
+    let recipe = Recipe::builder()
+        .title("Structured delegation under code mode")
+        .description("Delegates to a code-mode subagent, then returns structured output")
+        .prompt("Research and summarize")
+        .response(Response {
+            json_schema: Some(json!({
+                "type": "object",
+                "properties": { "result": { "type": "string" } },
+                "required": ["result"]
+            })),
+        })
+        .extensions(vec![ExtensionConfig::Platform {
+            name: "summon".to_string(),
+            description: "Delegate work".to_string(),
+            display_name: None,
+            bundled: None,
+            available_tools: vec![],
+        }])
+        .build()
+        .expect("valid recipe");
+    pipeline.set_recipe(recipe).await?;
+    pipeline.add_extension("code_execution").await?;
+    api.on("Research and summarize").calls([(
+        "call_delegate",
+        "delegate",
+        json!({
+            "instructions": "Find the answer",
+            "max_turns": 1,
+            "extensions": ["code_execution"]
+        }),
+    )]);
+    api.on("Find the answer")
+        .call(FINAL_OUTPUT_TOOL_NAME, json!({ "summary": "found it" }));
+    api.on("found it")
+        .call(FINAL_OUTPUT_TOOL_NAME, json!({ "result": "final" }));
+
+    let result = pipeline.run(["Research and summarize"]).await?;
+
+    assert_eq!(api.call_count(), 3);
+    assert!(api.calls()[1].advertises_tool(FINAL_OUTPUT_TOOL_NAME));
+    result.assert_message(-1, Agent, r#"{"result":"final"}"#);
+    let notices = subagent_delivery_reports(result.conversation());
+    assert!(notices.iter().any(|notice| notice.contains("completed")));
+    assert!(notices.iter().all(|notice| !notice.contains("failed")));
+
+    Ok(())
+}
+
+fn subagent_delivery_reports(conversation: &crate::conversation::Conversation) -> Vec<String> {
+    conversation
+        .messages()
+        .iter()
+        .filter(|message| message.role == rmcp::model::Role::User && !message.is_user_visible())
+        .map(|message| message.as_concat_text())
+        .filter(|text| text.contains("Subagent "))
+        .collect()
+}
+
 #[tokio::test]
 async fn final_output_nudge_goes_in_before_a_queued_steer() -> Result<()> {
     let (pipeline, api) = test_pipeline().await?;
@@ -506,42 +578,28 @@ async fn empty_responses_hand_the_turn_to_recipe_operations() -> Result<()> {
 
 #[cfg(feature = "code-mode")]
 #[tokio::test]
-async fn unadvertised_final_output_is_neither_approved_nor_executed() -> Result<()> {
+async fn unadvertised_extension_tools_are_neither_approved_nor_executed() -> Result<()> {
     let (pipeline, api) = test_pipeline().await?;
-    let recipe = Recipe::builder()
-        .title("Structured output boundary")
-        .description("Structured output boundary")
-        .instructions("Return structured output")
-        .response(Response {
-            json_schema: Some(json!({
-                "type": "object",
-                "properties": { "result": { "type": "string" } },
-                "required": ["result"]
-            })),
-        })
-        .build()
-        .expect("valid recipe");
-    pipeline.set_recipe(recipe).await?;
     pipeline.add_extension("code_execution").await?;
-    pipeline.set_permission(FINAL_OUTPUT_TOOL_NAME, PermissionLevel::AlwaysAllow);
+    pipeline.set_permission(ADD, PermissionLevel::AlwaysAllow);
     let pipeline = pipeline
         .with_max_turns(2)
         .with_goose_mode(GooseMode::Approve)
         .await;
-    api.on("try the hidden final output")
-        .unadvertised_call(FINAL_OUTPUT_TOOL_NAME, json!({ "result": "escaped" }));
-    api.on("not available").reply("recipe call blocked");
+    api.on("try the hidden calculator")
+        .unadvertised_call(ADD, value(2));
+    api.on("not available").reply("calculator call blocked");
 
-    let result = pipeline.run(["try the hidden final output"]).await?;
+    let result = pipeline.run(["try the hidden calculator"]).await?;
 
-    assert!(!api.calls()[0].advertises_tool(FINAL_OUTPUT_TOOL_NAME));
+    assert!(!api.calls()[0].advertises_tool(ADD));
     assert!(result.conversation().messages().iter().any(|message| {
         message.content.iter().any(|content| {
             matches!(content, MessageContent::ToolResponse(response)
             if response.tool_result.as_ref().is_ok_and(|result| {
                 result.content.iter().any(|content| {
                     content.as_text().is_some_and(|text| {
-                        text.text.contains("Tool 'recipe__final_output' is not available")
+                        text.text.contains("Tool 'calculator__add' is not available")
                     })
                 })
             }))
@@ -549,7 +607,7 @@ async fn unadvertised_final_output_is_neither_approved_nor_executed() -> Result<
     }));
     assert!(result.conversation().messages().iter().any(|message| {
         message.content.iter().any(|content| {
-            matches!(content, MessageContent::Text(text) if text.text == "recipe call blocked")
+            matches!(content, MessageContent::Text(text) if text.text == "calculator call blocked")
         })
     }));
     assert!(!result.conversation().messages().iter().any(|message| {
@@ -568,14 +626,45 @@ async fn unadvertised_final_output_is_neither_approved_nor_executed() -> Result<
             request
                 .tool_call
                 .as_ref()
-                .is_ok_and(|tool_call| tool_call.name == FINAL_OUTPUT_TOOL_NAME)
+                .is_ok_and(|tool_call| tool_call.name == ADD)
         })
-        .expect("final_output request");
+        .expect("calculator request");
     assert!(request
         .tool_meta
         .as_ref()
         .and_then(|metadata| metadata.get(TOOL_EXECUTABLE_KEY))
         .is_none());
+
+    Ok(())
+}
+
+#[cfg(feature = "code-mode")]
+#[tokio::test]
+async fn code_mode_keeps_the_structured_output_tool_advertised() -> Result<()> {
+    let (pipeline, api) = test_pipeline().await?;
+    let recipe = Recipe::builder()
+        .title("Structured output under code mode")
+        .description("Return structured output even with code execution enabled")
+        .instructions("Compute the answer")
+        .response(Response {
+            json_schema: Some(json!({
+                "type": "object",
+                "properties": { "result": { "type": "string" } },
+                "required": ["result"]
+            })),
+        })
+        .build()
+        .expect("valid recipe");
+    pipeline.set_recipe(recipe).await?;
+    pipeline.add_extension("code_execution").await?;
+    api.on("compute the answer").reply("thinking about it");
+    api.on(FINAL_OUTPUT_CONTINUATION_MESSAGE)
+        .call(FINAL_OUTPUT_TOOL_NAME, json!({ "result": "42" }));
+
+    let completed = pipeline.run(["compute the answer"]).await?;
+
+    assert!(api.calls()[0].advertises_tool(FINAL_OUTPUT_TOOL_NAME));
+    completed.assert_message(-1, Agent, r#"{"result":"42"}"#);
 
     Ok(())
 }
