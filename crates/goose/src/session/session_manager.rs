@@ -417,6 +417,14 @@ fn message_keyword_clause(keyword_count: usize) -> String {
     )
 }
 
+fn title_keyword_clause(keyword_count: usize) -> String {
+    let title_clauses = (0..keyword_count)
+        .map(|_| "(instr(LOWER(s.name), ?) > 0 OR instr(LOWER(s.description), ?) > 0)")
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    format!("({title_clauses})")
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionNameUpdate {
     pub session_id: String,
@@ -2272,7 +2280,11 @@ impl SessionStorage {
             where_clauses.push("s.working_dir = ?".to_string());
         }
         if !keywords.is_empty() {
-            where_clauses.push(message_keyword_clause(keywords.len()));
+            where_clauses.push(format!(
+                "({} OR {})",
+                message_keyword_clause(keywords.len()),
+                title_keyword_clause(keywords.len())
+            ));
         }
         if query.cursor.is_some() {
             having_clauses.push(format!(
@@ -2354,8 +2366,12 @@ impl SessionStorage {
         if let Some(working_dir) = filters.working_dir {
             q = q.bind(working_dir.to_string_lossy().to_string());
         }
-        for term in keywords {
-            q = q.bind(term);
+        for term in &keywords {
+            q = q.bind(term); // message clause binds (left operand of the OR)
+        }
+        for term in &keywords {
+            q = q.bind(term); // s.name bind
+            q = q.bind(term); // s.description bind
         }
         if let Some(cursor) = query.cursor {
             let sort_at = cursor.sort_at.timestamp();
@@ -4325,6 +4341,216 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_session_list_paged_keyword_matches_title() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let target = sm
+            .create_session(
+                PathBuf::from("/tmp/title-search"),
+                "PROJ-1234 login fix".to_string(),
+                SessionType::User,
+                GooseMode::default(),
+            )
+            .await
+            .unwrap()
+            .id;
+        sm.add_message(&target, &Message::user().with_text("unrelated work"))
+            .await
+            .unwrap();
+        create_session_for_list_with_message(&sm, "/tmp/title-search", "plain message").await;
+
+        let types = [SessionType::User];
+        let page = sm
+            .list_sessions_paged(SessionListPageQuery {
+                filters: SessionListFilters {
+                    types: Some(&types),
+                    keyword: Some("proj-1234"),
+                    only_sessions_with_messages: true,
+                    ..Default::default()
+                },
+                cursor: None,
+                page_size: 10,
+                include_last_message_snippet: false,
+            })
+            .await
+            .unwrap();
+        let ids = page
+            .sessions
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec![target]);
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_session_list_paged_keyword_title_match_is_case_insensitive() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let target = sm
+            .create_session(
+                PathBuf::from("/tmp/title-search"),
+                "Postgres Review Board".to_string(),
+                SessionType::User,
+                GooseMode::default(),
+            )
+            .await
+            .unwrap()
+            .id;
+        sm.add_message(&target, &Message::user().with_text("kicked off the audit"))
+            .await
+            .unwrap();
+        create_session_for_list_with_message(&sm, "/tmp/title-search", "plain message").await;
+
+        let types = [SessionType::User];
+        let page = sm
+            .list_sessions_paged(SessionListPageQuery {
+                filters: SessionListFilters {
+                    types: Some(&types),
+                    keyword: Some("POSTGRES"),
+                    only_sessions_with_messages: true,
+                    ..Default::default()
+                },
+                cursor: None,
+                page_size: 10,
+                include_last_message_snippet: false,
+            })
+            .await
+            .unwrap();
+        let ids = page
+            .sessions
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec![target]);
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_session_list_paged_keyword_matches_title_and_message_union() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let title_only = sm
+            .create_session(
+                PathBuf::from("/tmp/title-search"),
+                "PROJ-1234 login fix".to_string(),
+                SessionType::User,
+                GooseMode::default(),
+            )
+            .await
+            .unwrap()
+            .id;
+        sm.add_message(&title_only, &Message::user().with_text("unrelated work"))
+            .await
+            .unwrap();
+        let message_only = create_session_for_list_with_message(
+            &sm,
+            "/tmp/title-search",
+            "PROJ-1234 came up in review",
+        )
+        .await;
+        let both = sm
+            .create_session(
+                PathBuf::from("/tmp/title-search"),
+                "PROJ-1234 sync".to_string(),
+                SessionType::User,
+                GooseMode::default(),
+            )
+            .await
+            .unwrap()
+            .id;
+        sm.add_message(
+            &both,
+            &Message::user().with_text("PROJ-1234 progress update"),
+        )
+        .await
+        .unwrap();
+        create_session_for_list_with_message(&sm, "/tmp/title-search", "plain message").await;
+
+        let expected_ids = expected_session_list_ids(&sm, &[title_only, message_only, both]).await;
+
+        let types = [SessionType::User];
+        let page = sm
+            .list_sessions_paged(SessionListPageQuery {
+                filters: SessionListFilters {
+                    types: Some(&types),
+                    keyword: Some("proj-1234"),
+                    only_sessions_with_messages: true,
+                    ..Default::default()
+                },
+                cursor: None,
+                page_size: 10,
+                include_last_message_snippet: false,
+            })
+            .await
+            .unwrap();
+        let ids = page
+            .sessions
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, expected_ids);
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_session_list_paged_keyword_matches_description_when_name_empty() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let legacy = sm
+            .create_session(
+                PathBuf::from("/tmp/title-search"),
+                String::new(),
+                SessionType::User,
+                GooseMode::default(),
+            )
+            .await
+            .unwrap()
+            .id;
+        sqlx::query(
+            "UPDATE sessions SET description = 'Old format session about PROJ-42' WHERE id = ?",
+        )
+        .bind(&legacy)
+        .execute(sm.storage().pool().await.unwrap())
+        .await
+        .unwrap();
+        sm.add_message(&legacy, &Message::user().with_text("unrelated work"))
+            .await
+            .unwrap();
+        create_session_for_list_with_message(&sm, "/tmp/title-search", "plain message").await;
+
+        let restored = sm.get_session(&legacy, false).await.unwrap();
+        assert_eq!(restored.name, "Old format session about PROJ-42");
+
+        let types = [SessionType::User];
+        let page = sm
+            .list_sessions_paged(SessionListPageQuery {
+                filters: SessionListFilters {
+                    types: Some(&types),
+                    keyword: Some("proj-42"),
+                    only_sessions_with_messages: true,
+                    ..Default::default()
+                },
+                cursor: None,
+                page_size: 10,
+                include_last_message_snippet: false,
+            })
+            .await
+            .unwrap();
+        let ids = page
+            .sessions
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec![legacy]);
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[tokio::test]
     async fn test_session_list_paged_keyword_uses_or_terms() {
         let temp_dir = TempDir::new().unwrap();
         let sm = SessionManager::new(temp_dir.path().to_path_buf());
@@ -4364,6 +4590,171 @@ mod tests {
 
         assert_eq!(ids, expected_ids);
         assert!(page.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_session_list_paged_keyword_multi_term_or_across_fields() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let alpha = sm
+            .create_session(
+                PathBuf::from("/tmp/title-search"),
+                "alpha deploy".to_string(),
+                SessionType::User,
+                GooseMode::default(),
+            )
+            .await
+            .unwrap()
+            .id;
+        sm.add_message(&alpha, &Message::user().with_text("release checklist"))
+            .await
+            .unwrap();
+        let beta =
+            create_session_for_list_with_message(&sm, "/tmp/title-search", "beta rollback notes")
+                .await;
+        create_session_for_list_with_message(&sm, "/tmp/title-search", "gamma work").await;
+
+        let expected_ids = expected_session_list_ids(&sm, &[alpha, beta]).await;
+
+        let types = [SessionType::User];
+        let page = sm
+            .list_sessions_paged(SessionListPageQuery {
+                filters: SessionListFilters {
+                    types: Some(&types),
+                    keyword: Some("alpha beta"),
+                    only_sessions_with_messages: true,
+                    ..Default::default()
+                },
+                cursor: None,
+                page_size: 10,
+                include_last_message_snippet: false,
+            })
+            .await
+            .unwrap();
+        let ids = page
+            .sessions
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, expected_ids);
+    }
+
+    #[tokio::test]
+    async fn test_session_list_paged_keyword_title_match_without_visible_messages() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let hidden = sm
+            .create_session(
+                PathBuf::from("/tmp/title-search"),
+                "PROJ-55 hidden work".to_string(),
+                SessionType::User,
+                GooseMode::default(),
+            )
+            .await
+            .unwrap()
+            .id;
+        sm.add_message(
+            &hidden,
+            &Message::user()
+                .with_text("secret")
+                .with_visibility(false, true),
+        )
+        .await
+        .unwrap();
+
+        let types = [SessionType::User];
+        let page = sm
+            .list_sessions_paged(SessionListPageQuery {
+                filters: SessionListFilters {
+                    types: Some(&types),
+                    keyword: Some("proj-55"),
+                    only_sessions_with_messages: true,
+                    ..Default::default()
+                },
+                cursor: None,
+                page_size: 10,
+                include_last_message_snippet: false,
+            })
+            .await
+            .unwrap();
+        let ids = page
+            .sessions
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![hidden]);
+        assert_eq!(page.sessions[0].message_count, 0);
+
+        let page = sm
+            .list_sessions_paged(SessionListPageQuery {
+                filters: SessionListFilters {
+                    types: Some(&types),
+                    keyword: Some("secret"),
+                    only_sessions_with_messages: true,
+                    ..Default::default()
+                },
+                cursor: None,
+                page_size: 10,
+                include_last_message_snippet: false,
+            })
+            .await
+            .unwrap();
+        assert!(page.sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_session_list_paged_keyword_title_match_excludes_zero_message_sessions() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let fresh = sm
+            .create_session(
+                PathBuf::from("/tmp/title-search"),
+                "PROJ-77 fresh".to_string(),
+                SessionType::User,
+                GooseMode::default(),
+            )
+            .await
+            .unwrap()
+            .id;
+
+        let types = [SessionType::User];
+        let page = sm
+            .list_sessions_paged(SessionListPageQuery {
+                filters: SessionListFilters {
+                    types: Some(&types),
+                    keyword: Some("proj-77"),
+                    only_sessions_with_messages: true,
+                    ..Default::default()
+                },
+                cursor: None,
+                page_size: 10,
+                include_last_message_snippet: false,
+            })
+            .await
+            .unwrap();
+        assert!(page.sessions.is_empty());
+
+        let page = sm
+            .list_sessions_paged(SessionListPageQuery {
+                filters: SessionListFilters {
+                    types: Some(&types),
+                    keyword: Some("proj-77"),
+                    only_sessions_with_messages: false,
+                    ..Default::default()
+                },
+                cursor: None,
+                page_size: 10,
+                include_last_message_snippet: false,
+            })
+            .await
+            .unwrap();
+        let ids = page
+            .sessions
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![fresh]);
     }
 
     #[tokio::test]
@@ -4460,6 +4851,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_session_list_paged_keyword_treats_wildcards_as_literals_in_title() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let percent_session = sm
+            .create_session(
+                PathBuf::from("/tmp/title-search"),
+                "Deploy is 100% done".to_string(),
+                SessionType::User,
+                GooseMode::default(),
+            )
+            .await
+            .unwrap()
+            .id;
+        sm.add_message(&percent_session, &Message::user().with_text("ship it soon"))
+            .await
+            .unwrap();
+        let underscore_session = sm
+            .create_session(
+                PathBuf::from("/tmp/title-search"),
+                "feature_flag cleanup".to_string(),
+                SessionType::User,
+                GooseMode::default(),
+            )
+            .await
+            .unwrap()
+            .id;
+        sm.add_message(
+            &underscore_session,
+            &Message::user().with_text("flip the switch"),
+        )
+        .await
+        .unwrap();
+        create_session_for_list_with_message(&sm, "/tmp/title-search", "plain message").await;
+
+        let types = [SessionType::User];
+        let percent_page = sm
+            .list_sessions_paged(SessionListPageQuery {
+                filters: SessionListFilters {
+                    types: Some(&types),
+                    keyword: Some("%"),
+                    only_sessions_with_messages: true,
+                    ..Default::default()
+                },
+                cursor: None,
+                page_size: 10,
+                include_last_message_snippet: false,
+            })
+            .await
+            .unwrap();
+        let percent_ids = percent_page
+            .sessions
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(percent_ids, vec![percent_session]);
+
+        let underscore_page = sm
+            .list_sessions_paged(SessionListPageQuery {
+                filters: SessionListFilters {
+                    types: Some(&types),
+                    keyword: Some("_"),
+                    only_sessions_with_messages: true,
+                    ..Default::default()
+                },
+                cursor: None,
+                page_size: 10,
+                include_last_message_snippet: false,
+            })
+            .await
+            .unwrap();
+        let underscore_ids = underscore_page
+            .sessions
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(underscore_ids, vec![underscore_session]);
+    }
+
+    #[tokio::test]
     async fn test_session_list_paged_keyword_combines_with_cwd_and_pagination() {
         let temp_dir = TempDir::new().unwrap();
         let sm = SessionManager::new(temp_dir.path().to_path_buf());
@@ -4479,6 +4949,81 @@ mod tests {
             types: Some(&types),
             working_dir: Some(Path::new("/tmp/session-list/a")),
             keyword: Some("postgres"),
+            only_sessions_with_messages: true,
+        };
+        let cursor = sm
+            .list_sessions_paged(SessionListPageQuery {
+                filters: filters.clone(),
+                cursor: None,
+                page_size: 1,
+                include_last_message_snippet: false,
+            })
+            .await
+            .unwrap();
+        let ids = cursor
+            .sessions
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, expected_ids[0..1]);
+        assert!(cursor.next_cursor.is_some());
+
+        let page = sm
+            .list_sessions_paged(SessionListPageQuery {
+                filters,
+                cursor: cursor.next_cursor.as_ref(),
+                page_size: 1,
+                include_last_message_snippet: false,
+            })
+            .await
+            .unwrap();
+        let ids = page
+            .sessions
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, expected_ids[1..2]);
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_session_list_paged_keyword_combines_title_match_with_cwd_and_pagination() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let first = sm
+            .create_session(
+                PathBuf::from("/tmp/title-page/a"),
+                "PROJ-1 sync".to_string(),
+                SessionType::User,
+                GooseMode::default(),
+            )
+            .await
+            .unwrap()
+            .id;
+        sm.add_message(&first, &Message::user().with_text("unrelated work"))
+            .await
+            .unwrap();
+        let second = sm
+            .create_session(
+                PathBuf::from("/tmp/title-page/a"),
+                "PROJ-2 sync".to_string(),
+                SessionType::User,
+                GooseMode::default(),
+            )
+            .await
+            .unwrap()
+            .id;
+        sm.add_message(&second, &Message::user().with_text("unrelated work"))
+            .await
+            .unwrap();
+        create_session_for_list_with_message(&sm, "/tmp/title-page/a", "plain message").await;
+        let expected_ids = expected_session_list_ids(&sm, &[first, second]).await;
+
+        let types = [SessionType::User];
+        let filters = SessionListFilters {
+            types: Some(&types),
+            working_dir: Some(Path::new("/tmp/title-page/a")),
+            keyword: Some("sync"),
             only_sessions_with_messages: true,
         };
         let cursor = sm
