@@ -104,7 +104,7 @@ function getProviders(): ProviderConfig[] {
     },
     {
       provider: 'aws_bedrock',
-      models: ['us.anthropic.claude-sonnet-4-5-20250929-v1:0'],
+      models: ['us.anthropic.claude-sonnet-5-5'],
       available: () =>
         hasEnv('AWS_REGION') && (hasEnv('AWS_PROFILE') || hasEnv('AWS_ACCESS_KEY_ID')),
     },

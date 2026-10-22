@@ -39,7 +39,7 @@ pub(crate) const BEDROCK_PROVIDER_NAME: &str = "aws_bedrock";
 pub const BEDROCK_DOC_LINK: &str =
     "https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html";
 
-pub const BEDROCK_DEFAULT_MODEL: &str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
+pub const BEDROCK_DEFAULT_MODEL: &str = "us.anthropic.claude-sonnet-5-5";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BedrockEndpoint {
     Converse,
@@ -56,38 +56,20 @@ struct BedrockModelEntry {
 
 const BEDROCK_MODEL_TABLE: &[BedrockModelEntry] = &[
     BedrockModelEntry {
-        name: "global.anthropic.claude-sonnet-5",
-        wire_model_id: "global.anthropic.claude-sonnet-5",
+        name: "us.anthropic.claude-opus-5-5",
+        wire_model_id: "us.anthropic.claude-opus-5-5",
         endpoint: BedrockEndpoint::Converse,
         context_limit: None,
     },
     BedrockModelEntry {
-        name: "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-        wire_model_id: "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        name: "us.anthropic.claude-sonnet-5-5",
+        wire_model_id: "us.anthropic.claude-sonnet-5-5",
         endpoint: BedrockEndpoint::Converse,
         context_limit: None,
     },
     BedrockModelEntry {
-        name: "us.anthropic.claude-sonnet-4-20250514-v1:0",
-        wire_model_id: "us.anthropic.claude-sonnet-4-20250514-v1:0",
-        endpoint: BedrockEndpoint::Converse,
-        context_limit: None,
-    },
-    BedrockModelEntry {
-        name: "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
-        wire_model_id: "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
-        endpoint: BedrockEndpoint::Converse,
-        context_limit: None,
-    },
-    BedrockModelEntry {
-        name: "us.anthropic.claude-opus-4-20250514-v1:0",
-        wire_model_id: "us.anthropic.claude-opus-4-20250514-v1:0",
-        endpoint: BedrockEndpoint::Converse,
-        context_limit: None,
-    },
-    BedrockModelEntry {
-        name: "us.anthropic.claude-opus-4-1-20250805-v1:0",
-        wire_model_id: "us.anthropic.claude-opus-4-1-20250805-v1:0",
+        name: "us.anthropic.claude-haiku-5-5",
+        wire_model_id: "us.anthropic.claude-haiku-5-5",
         endpoint: BedrockEndpoint::Converse,
         context_limit: None,
     },
@@ -1367,8 +1349,7 @@ mod tests {
     fn test_caching_enabled_for_claude_model() {
         std::env::set_var("BEDROCK_ENABLE_CACHING", "true");
 
-        let (provider, model) =
-            create_mock_provider_and_model("us.anthropic.claude-sonnet-4-5-20250929-v1:0");
+        let (provider, model) = create_mock_provider_and_model("us.anthropic.claude-sonnet-5-5");
         assert!(
             provider.should_enable_caching(&model),
             "Caching should be enabled for Claude models when BEDROCK_ENABLE_CACHING=true"
@@ -2140,8 +2121,60 @@ mod tests {
     }
     #[test]
     fn test_converse_model_not_mantle() {
-        let entry = find_model_entry("us.anthropic.claude-sonnet-4-5-20250929-v1:0").unwrap();
+        let entry = find_model_entry("us.anthropic.claude-sonnet-5-5").unwrap();
         assert_eq!(entry.endpoint, BedrockEndpoint::Converse);
+    }
+
+    #[test]
+    fn test_claude_table_entries_route_to_converse() {
+        for entry in BEDROCK_MODEL_TABLE {
+            if entry.name.contains("anthropic.claude") {
+                assert_eq!(
+                    find_model_entry(entry.name).unwrap().endpoint,
+                    BedrockEndpoint::Converse,
+                    "{} should route via Converse",
+                    entry.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_default_model_is_a_table_entry() {
+        let entry = find_model_entry(BEDROCK_DEFAULT_MODEL).unwrap_or_else(|| {
+            panic!("default model {} missing from table", BEDROCK_DEFAULT_MODEL)
+        });
+        assert_eq!(entry.name, BEDROCK_DEFAULT_MODEL);
+    }
+
+    #[test]
+    fn test_claude_5_5_metadata_in_known_models() {
+        let metadata = BedrockProvider::metadata();
+        let model = metadata
+            .known_models
+            .iter()
+            .find(|model| model.name == "us.anthropic.claude-sonnet-5-5")
+            .unwrap();
+        assert_eq!(model.context_limit, Some(1_000_000));
+        assert!(model.reasoning);
+
+        for stale in [
+            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "us.anthropic.claude-sonnet-4-20250514-v1:0",
+            "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+            "us.anthropic.claude-opus-4-20250514-v1:0",
+            "us.anthropic.claude-opus-4-1-20250805-v1:0",
+            "global.anthropic.claude-sonnet-5",
+        ] {
+            assert!(
+                metadata
+                    .known_models
+                    .iter()
+                    .all(|model| model.name != stale),
+                "{} should no longer be advertised",
+                stale
+            );
+        }
     }
 
     fn stream_tool_call(state: &mut StreamBlockState, input: &str) {

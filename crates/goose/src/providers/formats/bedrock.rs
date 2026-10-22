@@ -741,6 +741,72 @@ mod tests {
     }
 
     #[test]
+    fn test_bedrock_anthropic_thinking_fields_claude_5_5_effort_levels() {
+        for effort in ["low", "medium", "high", "max"] {
+            let mut config = ModelConfig::new("us.anthropic.claude-sonnet-5-5");
+            config.reasoning = Some(true);
+            config.request_params = Some(HashMap::from([(
+                "thinking_effort".to_string(),
+                json!(effort),
+            )]));
+
+            let fields = bedrock_anthropic_thinking_fields(&config).expect("thinking fields");
+            assert_eq!(
+                from_bedrock_json(&fields).unwrap(),
+                json!({
+                    "thinking": {"type": "adaptive"},
+                    "output_config": {"effort": effort}
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn test_bedrock_anthropic_thinking_fields_claude_5_5_off_ignored() {
+        let mut config = ModelConfig::new("us.anthropic.claude-sonnet-5-5");
+        config.reasoning = Some(true);
+        config.request_params = Some(HashMap::from([(
+            "thinking_effort".to_string(),
+            json!("off"),
+        )]));
+
+        let fields = bedrock_anthropic_thinking_fields(&config).expect("thinking fields");
+        assert_eq!(
+            from_bedrock_json(&fields).unwrap(),
+            json!({
+                "thinking": {"type": "adaptive"},
+                "output_config": {"effort": "high"}
+            })
+        );
+    }
+
+    #[test]
+    fn test_bedrock_anthropic_thinking_fields_claude_5_5_family() {
+        for model in [
+            "us.anthropic.claude-haiku-5-5",
+            "us.anthropic.claude-opus-5-5",
+        ] {
+            let mut config = ModelConfig::new(model);
+            config.reasoning = Some(true);
+            config.request_params = Some(HashMap::from([(
+                "thinking_effort".to_string(),
+                json!("low"),
+            )]));
+
+            let fields = bedrock_anthropic_thinking_fields(&config).expect("thinking fields");
+            assert_eq!(
+                from_bedrock_json(&fields).unwrap(),
+                json!({
+                    "thinking": {"type": "adaptive"},
+                    "output_config": {"effort": "low"}
+                }),
+                "{} should emit adaptive thinking",
+                model
+            );
+        }
+    }
+
+    #[test]
     fn test_bedrock_anthropic_thinking_fields_always_on_adaptive() {
         let mut config = ModelConfig::new("global.anthropic.claude-fable-5");
         config.reasoning = Some(true);
