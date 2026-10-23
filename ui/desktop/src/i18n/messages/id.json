@@ -3884,6 +3884,9 @@
   "sessions.scheduledJobsCount": {
     "defaultMessage": "{count,plural,one{{count} job} other{{count} jobs}}"
   },
+  "sessions.search.matchedInTitle": {
+    "defaultMessage": "Judul yang cocok"
+  },
   "sessions.search.noResults": {
     "defaultMessage": "Tidak ada sesi yang cocok ditemukan"
   },

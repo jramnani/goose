@@ -3884,6 +3884,9 @@
   "sessions.scheduledJobsCount": {
     "defaultMessage": "{count,plural,one{{count} job} other{{count} jobs}}"
   },
+  "sessions.search.matchedInTitle": {
+    "defaultMessage": "相符的標題"
+  },
   "sessions.search.noResults": {
     "defaultMessage": "找不到符合的工作階段"
   },

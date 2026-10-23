@@ -2,7 +2,7 @@ use crate::agents::{Agent, ExtensionLoadResult};
 use crate::config::{Config, GooseMode};
 use crate::providers::inventory::{ProviderInventoryEntry, ProviderInventoryService};
 use crate::session::session_manager::SessionUsageTotals;
-use crate::session::Session;
+use crate::session::{MatchedIn, Session};
 use crate::slash_commands::types::{SlashCommandEntry, SlashCommandSource};
 use agent_client_protocol::schema::v1::{
     AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate, SessionConfigOption,
@@ -45,6 +45,10 @@ struct SessionMeta<'a> {
     model_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_message_snippet: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    matched_in: Option<MatchedIn>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    matched_message_snippet: Option<&'a str>,
 }
 
 impl<'a> From<&'a Session> for SessionMeta<'a> {
@@ -64,6 +68,8 @@ impl<'a> From<&'a Session> for SessionMeta<'a> {
                 .as_ref()
                 .map(|mc| mc.model_name.as_str()),
             last_message_snippet: session.last_message_snippet.as_deref(),
+            matched_in: session.matched_in,
+            matched_message_snippet: session.matched_message_snippet.as_deref(),
         }
     }
 }
@@ -509,6 +515,7 @@ pub(super) fn send_session_setup_notifications(
 mod tests {
     use super::super::provider::THINKING_EFFORT_PARAM;
     use super::*;
+    use crate::session::MatchedIn;
     use agent_client_protocol::schema::v1::SessionConfigKind;
     use goose_providers::thinking::ThinkingEffortOption;
     use test_case::test_case;
@@ -524,6 +531,35 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn test_session_meta_serializes_match_fields() {
+        let snippet = "…and again PROJ-1234 failed in the nightly…";
+        let session = Session {
+            matched_in: Some(MatchedIn::TitleAndMessage),
+            matched_message_snippet: Some(snippet.to_string()),
+            ..Session::default()
+        };
+
+        let meta = session_meta(&session);
+
+        assert_eq!(
+            meta.get("matchedIn"),
+            Some(&serde_json::json!("title+message"))
+        );
+        assert_eq!(
+            meta.get("matchedMessageSnippet"),
+            Some(&serde_json::json!(snippet))
+        );
+    }
+
+    #[test]
+    fn test_session_meta_skips_match_fields_when_absent() {
+        let meta = session_meta(&Session::default());
+
+        assert!(!meta.contains_key("matchedIn"));
+        assert!(!meta.contains_key("matchedMessageSnippet"));
     }
 
     #[test_case(

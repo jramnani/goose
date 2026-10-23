@@ -24,7 +24,11 @@ interface GooseSessionInfoMeta {
   userSetName?: boolean;
   hasRecipe?: boolean;
   lastMessageSnippet?: string;
+  matchedIn?: SessionMatchedIn;
+  matchedMessageSnippet?: string;
 }
+
+export type SessionMatchedIn = 'message' | 'title' | 'title+message';
 
 export interface SessionListItem {
   id: string;
@@ -41,6 +45,8 @@ export interface SessionListItem {
   userSetName?: boolean;
   hasRecipe?: boolean;
   sessionType?: Session['session_type'];
+  matchedIn?: SessionMatchedIn;
+  matchedMessageSnippet?: string;
 }
 
 export interface SessionListPage {
@@ -113,7 +119,7 @@ export function sessionInfoToSession(s: SessionInfo, loadMeta: LoadSessionMeta =
   };
 }
 
-function sessionInfoToListItem(s: SessionInfo): SessionListItem {
+export function sessionInfoToListItem(s: SessionInfo): SessionListItem {
   const meta = sessionInfoMeta(s);
   return {
     id: String(s.sessionId),
@@ -130,6 +136,8 @@ function sessionInfoToListItem(s: SessionInfo): SessionListItem {
     userSetName: meta.userSetName,
     hasRecipe: meta.hasRecipe,
     sessionType: meta.sessionType,
+    matchedIn: meta.matchedIn,
+    matchedMessageSnippet: meta.matchedMessageSnippet,
   };
 }
 

@@ -3884,6 +3884,9 @@
   "sessions.scheduledJobsCount": {
     "defaultMessage": "{count,plural,one{{count} job} other{{count} jobs}}"
   },
+  "sessions.search.matchedInTitle": {
+    "defaultMessage": "일치하는 제목"
+  },
   "sessions.search.noResults": {
     "defaultMessage": "일치하는 세션이 없습니다."
   },

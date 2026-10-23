@@ -3884,6 +3884,9 @@
   "sessions.scheduledJobsCount": {
     "defaultMessage": "{count,plural,one{{count} job} other{{count} jobs}}"
   },
+  "sessions.search.matchedInTitle": {
+    "defaultMessage": "मिलान हुआ शीर्षक"
+  },
   "sessions.search.noResults": {
     "defaultMessage": "कोई मिलान सत्र नहीं मिला"
   },

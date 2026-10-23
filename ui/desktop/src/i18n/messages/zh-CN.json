@@ -3884,6 +3884,9 @@
   "sessions.scheduledJobsCount": {
     "defaultMessage": "{count,plural,one{{count} job} other{{count} jobs}}"
   },
+  "sessions.search.matchedInTitle": {
+    "defaultMessage": "匹配的标题"
+  },
   "sessions.search.noResults": {
     "defaultMessage": "未找到匹配的会话"
   },

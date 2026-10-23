@@ -13,6 +13,7 @@ use crate::session::extension_data::{EnabledExtensionsState, ExtensionData, Exte
 use crate::session::session_naming::{
     generate_session_name, MSG_COUNT_FOR_SESSION_NAME_GENERATION,
 };
+use crate::session::MatchedIn;
 use anyhow::Result;
 use chrono::{DateTime, TimeZone, Utc};
 use goose_providers::conversation::token_usage::Usage;
@@ -100,6 +101,10 @@ pub struct Session {
     pub parent_session_id: Option<String>,
     #[serde(default)]
     pub last_message_snippet: Option<String>,
+    #[serde(default)]
+    pub matched_message_snippet: Option<String>,
+    #[serde(default)]
+    pub matched_in: Option<MatchedIn>,
     #[serde(default)]
     pub system_prompt_override: Option<String>,
     #[serde(default)]
@@ -392,11 +397,15 @@ fn keyword_terms(query: Option<&str>) -> Vec<String> {
         .collect()
 }
 
-fn message_keyword_clause(keyword_count: usize) -> String {
-    let keyword_clauses = (0..keyword_count)
+pub(super) fn message_text_match_clause(keyword_count: usize) -> String {
+    (0..keyword_count)
         .map(|_| "instr(LOWER(json_extract(value, '$.text')), ?) > 0")
         .collect::<Vec<_>>()
-        .join(" OR ");
+        .join(" OR ")
+}
+
+fn message_keyword_clause(keyword_count: usize) -> String {
+    let keyword_clauses = message_text_match_clause(keyword_count);
 
     let visible = user_visible_message_sql("mq.metadata_json");
     format!(
@@ -848,7 +857,7 @@ fn normalized_message_timestamp_sql(column: &str) -> String {
     )
 }
 
-fn user_visible_message_sql(column: &str) -> String {
+pub(super) fn user_visible_message_sql(column: &str) -> String {
     format!("COALESCE(json_extract({column}, '$.userVisible'), 1) != 0")
 }
 
@@ -883,6 +892,8 @@ impl Default for Session {
             project_id: None,
             parent_session_id: None,
             last_message_snippet: None,
+            matched_message_snippet: None,
+            matched_in: None,
             system_prompt_override: None,
             system_prompt_extras: IndexMap::new(),
             container: None,
@@ -1005,6 +1016,8 @@ impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for Session {
             project_id: row.try_get("project_id").ok().flatten(),
             parent_session_id: row.try_get("parent_session_id").ok().flatten(),
             last_message_snippet: None,
+            matched_message_snippet: None,
+            matched_in: None,
             system_prompt_override: row.try_get("system_prompt_override")?,
             system_prompt_extras: row
                 .try_get::<Option<String>, _>("system_prompt_extras_json")?
@@ -2454,6 +2467,7 @@ impl SessionStorage {
 
         let page_size = query.page_size;
         let include_last_message_snippet = query.include_last_message_snippet;
+        let terms = keyword_terms(query.filters.keyword);
         let mut sessions = self
             .list_sessions_matching(SessionListQuery {
                 filters: query.filters,
@@ -2477,6 +2491,18 @@ impl SessionStorage {
         if include_last_message_snippet {
             let pool = self.pool().await?;
             super::last_message_snippet::hydrate_last_message_snippets(pool, &mut sessions).await?;
+        }
+        if !terms.is_empty() {
+            let pool = self.pool().await?;
+            if let Err(err) = super::matched_message_snippet::hydrate_matched_message_snippets(
+                pool,
+                &mut sessions,
+                &terms,
+            )
+            .await
+            {
+                warn!("failed to hydrate matched message snippets: {err}");
+            }
         }
 
         Ok(SessionListPage {

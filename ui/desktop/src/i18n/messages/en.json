@@ -3932,6 +3932,9 @@
   "sessions.scheduledJobsCount": {
     "defaultMessage": "{count,plural,one{{count} job} other{{count} jobs}}"
   },
+  "sessions.search.matchedInTitle": {
+    "defaultMessage": "matched title"
+  },
   "sessions.search.noResults": {
     "defaultMessage": "No matching sessions found"
   },
