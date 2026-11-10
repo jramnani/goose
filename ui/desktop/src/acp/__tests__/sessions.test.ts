@@ -6,6 +6,7 @@ import {
   acpListSessions,
   acpLoadSession,
   acpNewSession,
+  sessionInfoToListItem,
   sessionInfoToSession,
 } from '../sessions';
 
@@ -219,5 +220,28 @@ describe('ACP sessions', () => {
       providerId: 'anthropic',
       modelId: 'claude-sonnet-4-5',
     });
+  });
+
+  it('maps match context from session info metadata onto the list item', () => {
+    const item = sessionInfoToListItem(
+      sessionInfo({
+        _meta: {
+          createdAt: '2026-01-01T00:00:00Z',
+          messageCount: 1,
+          matchedIn: 'title+message',
+          matchedMessageSnippet: '…and again PROJ-1234 failed in the nightly…',
+        },
+      })
+    );
+
+    expect(item.matchedIn).toBe('title+message');
+    expect(item.matchedMessageSnippet).toBe('…and again PROJ-1234 failed in the nightly…');
+  });
+
+  it('leaves match context undefined when the metadata omits it', () => {
+    const item = sessionInfoToListItem(sessionInfo());
+
+    expect(item.matchedIn).toBeUndefined();
+    expect(item.matchedMessageSnippet).toBeUndefined();
   });
 });

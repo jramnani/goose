@@ -9,12 +9,12 @@ const LAST_MESSAGE_SNIPPET_MAX_CHARS: usize = 128;
 const RECENT_MESSAGE_SNIPPET_SCAN_LIMIT: usize = 8;
 
 #[derive(Debug, sqlx::FromRow)]
-struct RecentMessageRow {
-    row_id: i64,
-    session_id: String,
+pub(super) struct RecentMessageRow {
+    pub(super) row_id: i64,
+    pub(super) session_id: String,
     role: String,
     content_json: String,
-    created_timestamp: i64,
+    pub(super) created_timestamp: i64,
     metadata_json: Option<String>,
     message_id: Option<String>,
 }
@@ -95,7 +95,7 @@ async fn recent_message_rows(
     Ok(rows)
 }
 
-fn message_from_recent_row(row: RecentMessageRow) -> Result<Option<Message>> {
+pub(super) fn message_from_recent_row(row: RecentMessageRow) -> Result<Option<Message>> {
     let role = match row.role.as_str() {
         "user" => Role::User,
         "assistant" => Role::Assistant,
@@ -119,14 +119,13 @@ fn message_from_recent_row(row: RecentMessageRow) -> Result<Option<Message>> {
     Ok(Some(message))
 }
 
-/// Build a bounded, single-line snippet from user-visible message text.
+/// The whitespace-normalized concatenation of a message's user-audience text
+/// blocks, or `None` when nothing user-visible remains.
 ///
 /// Tool-request, tool-response, thinking, image-only, and assistant-audience
-/// blocks collapse to an empty string and return `None`. Internal whitespace
-/// and newlines are collapsed to single spaces, and the result includes at most
-/// `max_chars` characters of content; if truncated, a trailing `…` is appended
-/// so it can be rendered verbatim by clients.
-fn message_snippet(message: &Message, max_chars: usize) -> Option<String> {
+/// blocks are dropped; internal whitespace and newlines collapse to single
+/// spaces.
+pub(super) fn normalized_user_text(message: &Message) -> Option<String> {
     if !message.metadata.user_visible {
         return None;
     }
@@ -140,8 +139,19 @@ fn message_snippet(message: &Message, max_chars: usize) -> Option<String> {
         .join("\n");
     let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if normalized.is_empty() {
-        return None;
+        None
+    } else {
+        Some(normalized)
     }
+}
+
+/// Build a bounded, single-line snippet from user-visible message text.
+///
+/// Delegates to [`normalized_user_text`]; the result includes at most `max_chars`
+/// characters of content, with a trailing `…` appended when truncated so it can
+/// be rendered verbatim by clients.
+pub(super) fn message_snippet(message: &Message, max_chars: usize) -> Option<String> {
+    let normalized = normalized_user_text(message)?;
 
     let mut chars = normalized.chars();
     let mut result: String = chars.by_ref().take(max_chars).collect();

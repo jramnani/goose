@@ -85,6 +85,10 @@ const i18n = defineMessages({
     id: 'sessions.search.noResultsDesc',
     defaultMessage: 'Try adjusting your search terms',
   },
+  matchedInTitle: {
+    id: 'sessions.search.matchedInTitle',
+    defaultMessage: 'matched title',
+  },
   loadingMore: { id: 'sessions.loadingMore', defaultMessage: 'Loading more sessions...' },
   deleteTitle: { id: 'sessions.delete.title', defaultMessage: 'Delete Session' },
   deleteMessage: {
@@ -278,6 +282,51 @@ interface SessionListViewProps {
   onSelectSession: (sessionId: string) => void;
 }
 
+/**
+ * Split a matched-message snippet into plain and highlighted segments for the
+ * active search terms (case-insensitive OR match, mirroring the server-side
+ * keyword filter).
+ */
+export function matchedSnippetSegments(
+  snippet: string,
+  terms: string[]
+): Array<{ text: string; highlighted: boolean }> {
+  const lowercaseTerms = [...new Set(terms.map((term) => term.trim().toLowerCase()))].filter(
+    (term) => term.length > 0
+  );
+  if (lowercaseTerms.length === 0) {
+    return [{ text: snippet, highlighted: false }];
+  }
+
+  const lowered = snippet.toLowerCase();
+  const segments: Array<{ text: string; highlighted: boolean }> = [];
+  let index = 0;
+  while (index < snippet.length) {
+    let earliestAt: number | null = null;
+    let earliestTerm = '';
+    for (const term of lowercaseTerms) {
+      const at = lowered.indexOf(term, index);
+      if (at !== -1 && (earliestAt === null || at < earliestAt)) {
+        earliestAt = at;
+        earliestTerm = term;
+      }
+    }
+    if (earliestAt === null) {
+      segments.push({ text: snippet.slice(index), highlighted: false });
+      break;
+    }
+    if (earliestAt > index) {
+      segments.push({ text: snippet.slice(index, earliestAt), highlighted: false });
+    }
+    segments.push({
+      text: snippet.slice(earliestAt, earliestAt + earliestTerm.length),
+      highlighted: true,
+    });
+    index = earliestAt + earliestTerm.length;
+  }
+  return segments;
+}
+
 const SessionListView: React.FC<SessionListViewProps> = React.memo(({ onSelectSession }) => {
   const intl = useIntl();
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
@@ -310,6 +359,10 @@ const SessionListView: React.FC<SessionListViewProps> = React.memo(({ onSelectSe
   const debouncedSearchTerm = useDebounce(searchTerm, 300); // 300ms debounce
   const debouncedSearchTermRef = useRef(debouncedSearchTerm);
   debouncedSearchTermRef.current = debouncedSearchTerm;
+  const searchTerms = useMemo(
+    () => debouncedSearchTerm.split(/\s+/).filter((term) => term.length > 0),
+    [debouncedSearchTerm]
+  );
 
   const containerRef = useRef<HTMLDivElement>(null);
   const loadGenerationRef = useRef(0);
@@ -664,6 +717,7 @@ const SessionListView: React.FC<SessionListViewProps> = React.memo(({ onSelectSe
 
   const SessionItem = React.memo(function SessionItem({
     session,
+    searchTerms,
     onEditClick,
     onDuplicateClick,
     onDeleteClick,
@@ -671,6 +725,7 @@ const SessionListView: React.FC<SessionListViewProps> = React.memo(({ onSelectSe
     onOpenInNewWindow,
   }: {
     session: SessionListItem;
+    searchTerms?: string[];
     onEditClick: (session: SessionListItem) => void;
     onDuplicateClick: (session: SessionListItem) => void;
     onDeleteClick: (session: SessionListItem) => void;
@@ -720,6 +775,8 @@ const SessionListView: React.FC<SessionListViewProps> = React.memo(({ onSelectSe
     );
 
     const displayName = session.name;
+    const matchedTitle =
+      session.matchedIn === 'title' || session.matchedIn === 'title+message';
 
     return (
       <Card
@@ -728,6 +785,28 @@ const SessionListView: React.FC<SessionListViewProps> = React.memo(({ onSelectSe
       >
         <div>
           <h3 className="text-base break-words line-clamp-2 w-full mb-1">{displayName}</h3>
+          {matchedTitle && (
+            <span className="text-xs text-text-tertiary bg-background-secondary px-2 py-0.5 rounded-full">
+              {intl.formatMessage(i18n.matchedInTitle)}
+            </span>
+          )}
+          {session.matchedMessageSnippet && (
+            <p className="text-xs text-text-tertiary line-clamp-2 break-words mt-1">
+              {matchedSnippetSegments(session.matchedMessageSnippet, searchTerms ?? []).map(
+                (segment, segmentIndex) =>
+                  segment.highlighted ? (
+                    <span
+                      key={segmentIndex}
+                      className="bg-[var(--highlight-color)] text-text-primary rounded-[2px] px-0.5 font-medium"
+                    >
+                      {segment.text}
+                    </span>
+                  ) : (
+                    <span key={segmentIndex}>{segment.text}</span>
+                  )
+              )}
+            </p>
+          )}
           {session.sessionType === 'acp' && (
             <span className="text-xs text-text-tertiary bg-background-secondary px-2 py-0.5 rounded-full">
               {intl.formatMessage(i18n.acpBadge)}
@@ -893,6 +972,7 @@ const SessionListView: React.FC<SessionListViewProps> = React.memo(({ onSelectSe
                 <SessionItem
                   key={session.id}
                   session={session}
+                  searchTerms={searchTerms}
                   onEditClick={handleEditSession}
                   onDuplicateClick={handleDuplicateSession}
                   onDeleteClick={handleDeleteSession}
@@ -944,6 +1024,7 @@ const SessionListView: React.FC<SessionListViewProps> = React.memo(({ onSelectSe
                           <SessionItem
                             key={session.id}
                             session={session}
+                            searchTerms={searchTerms}
                             onEditClick={handleEditSession}
                             onDuplicateClick={handleDuplicateSession}
                             onDeleteClick={handleDeleteSession}

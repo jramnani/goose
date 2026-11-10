@@ -6,6 +6,7 @@ pub mod extension_data;
 pub mod import_formats;
 mod last_message_snippet;
 mod legacy;
+mod matched_message_snippet;
 pub mod session_manager;
 mod session_naming;
 
@@ -22,6 +23,7 @@ pub use export_markdown::{
 pub use extension_data::{
     EnabledExtensionsState, ExtensionData, ExtensionState, GoalState, TodoState,
 };
+pub use matched_message_snippet::MatchedIn;
 pub use session_manager::{
     Session, SessionInsights, SessionManager, SessionNameUpdate, SessionType, SessionUpdateBuilder,
 };
