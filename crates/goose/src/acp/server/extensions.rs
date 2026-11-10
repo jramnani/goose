@@ -10,7 +10,7 @@ impl AcpConnection {
         req: AddSessionExtensionRequest,
     ) -> Result<EmptyResponse, agent_client_protocol::Error> {
         let session_id = &req.session_id;
-        let config = goose_extension_to_config_without_secrets(req.extension)?;
+        let config = extension_config_from_client(Config::global(), req.extension)?;
         self.open_session(&req.session_id).await?;
         self.services
             .extension_manager
@@ -355,7 +355,7 @@ fn goose_extension_to_config(
     })
 }
 
-fn goose_extension_to_config_without_secrets(
+pub(super) fn goose_extension_to_config_without_secrets(
     extension: GooseExtension,
 ) -> Result<ExtensionConfig, agent_client_protocol::Error> {
     let conversion = goose_extension_to_config(extension)?;
@@ -365,15 +365,6 @@ fn goose_extension_to_config_without_secrets(
         ));
     }
     Ok(conversion.config)
-}
-
-pub(super) fn goose_extensions_to_configs(
-    extensions: Vec<GooseExtension>,
-) -> Result<Vec<ExtensionConfig>, agent_client_protocol::Error> {
-    extensions
-        .into_iter()
-        .map(goose_extension_to_config_without_secrets)
-        .collect()
 }
 
 fn config_entry_to_goose_entry(

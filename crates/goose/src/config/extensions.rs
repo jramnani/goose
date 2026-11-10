@@ -238,6 +238,18 @@ pub fn get_enabled_extensions_with_config(config: &Config) -> Vec<ExtensionConfi
         .collect()
 }
 
+/// Returns the full config for the configured extension with this name,
+/// regardless of its enabled state, or `None` when there is no entry.
+pub fn configured_extension_by_name(config: &Config, name: &str) -> Option<ExtensionConfig> {
+    let extensions = get_extensions_map_with_config(config);
+    let key = name_to_key(name);
+    extensions
+        .values()
+        .find(|entry| entry.config.name() == name)
+        .or_else(|| extensions.get(&key))
+        .map(|entry| entry.config.clone())
+}
+
 pub fn get_available_extensions() -> Vec<ExtensionConfig> {
     let mut builtin_names = crate::builtin_extension::get_builtin_extension_names();
     builtin_names.sort_unstable();

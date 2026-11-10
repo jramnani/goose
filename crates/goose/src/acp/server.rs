@@ -605,6 +605,37 @@ fn selected_builtin_extensions(
     extensions
 }
 
+fn goose_extension_name(extension: &GooseExtension) -> Option<&str> {
+    match extension {
+        GooseExtension::Builtin { name, .. } | GooseExtension::Platform { name, .. } => Some(name),
+        GooseExtension::Mcp { server, .. } => match server.as_ref() {
+            McpServer::Stdio(server) => Some(&server.name),
+            McpServer::Http(server) => Some(&server.name),
+            McpServer::Sse(server) => Some(&server.name),
+            _ => None,
+        },
+    }
+}
+
+/// Resolves a client-supplied extension for the session. A configured
+/// extension with the same name wins, so the session keeps the literal env
+/// values from config.yaml and env values never travel over ACP. Payloads
+/// with no matching config entry convert as-is, which still rejects inline
+/// env values.
+fn extension_config_from_client(
+    config: &Config,
+    extension: GooseExtension,
+) -> Result<ExtensionConfig, agent_client_protocol::Error> {
+    if let Some(name) = goose_extension_name(&extension) {
+        if let Some(configured) =
+            crate::config::extensions::configured_extension_by_name(config, name)
+        {
+            return Ok(configured);
+        }
+    }
+    extensions::goose_extension_to_config_without_secrets(extension)
+}
+
 fn initial_session_extensions(
     config: &Config,
     builtin_selection: &AcpBuiltinSelection,
@@ -617,8 +648,9 @@ fn initial_session_extensions(
     // extensions, and `[memory]` starts Memory without the default built-ins.
     if let (None, Some(goose_extensions)) = (recipe_extensions, goose_extensions) {
         let mut selected = Vec::new();
-        for extension in extensions::goose_extensions_to_configs(goose_extensions)? {
-            push_or_replace_extension(&mut selected, extension);
+        for extension in goose_extensions {
+            let config = extension_config_from_client(config, extension)?;
+            push_or_replace_extension(&mut selected, config);
         }
         return Ok(selected);
     }
@@ -2984,6 +3016,104 @@ extensions:
 
         let names: Vec<String> = extensions.iter().map(ExtensionConfig::name).collect();
         assert_eq!(names, vec!["memory".to_string()]);
+    }
+
+    fn client_stdio_mcp(name: &str) -> GooseExtension {
+        GooseExtension::Mcp {
+            server: Box::new(McpServer::Stdio(McpServerStdio::new(
+                name,
+                "/usr/local/bin/splunk-mcp",
+            ))),
+            env_keys: vec![],
+            description: None,
+            timeout: None,
+            socket: None,
+            client_id: None,
+            client_secret_key: None,
+            scopes: vec![],
+            bundled: None,
+            available_tools: None,
+        }
+    }
+
+    #[test]
+    fn client_selection_takes_configured_extension_with_its_envs() {
+        let (config, _c, _s) = config_with_yaml(
+            r#"
+extensions:
+  splunk-nonprod:
+    enabled: true
+    type: stdio
+    name: splunk-nonprod
+    cmd: /usr/local/bin/splunk-mcp
+    args: ["--nonprod"]
+    envs:
+      SPLUNK_URL: https://splunk.nonprod.example.com
+"#,
+        );
+        let project_root = tempfile::tempdir().unwrap();
+
+        let extensions = initial_session_extensions(
+            &config,
+            &AcpBuiltinSelection::default(),
+            project_root.path(),
+            vec![],
+            Some(vec![client_stdio_mcp("splunk-nonprod")]),
+            None,
+        )
+        .unwrap();
+
+        let ExtensionConfig::Stdio { envs, .. } = &extensions[0] else {
+            panic!("expected stdio extension");
+        };
+        assert_eq!(
+            envs.get_env().get("SPLUNK_URL"),
+            Some(&"https://splunk.nonprod.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn client_selection_uses_payload_for_extensions_missing_from_config() {
+        let (config, _c, _s) = developer_enabled_config();
+        let project_root = tempfile::tempdir().unwrap();
+
+        let extensions = initial_session_extensions(
+            &config,
+            &AcpBuiltinSelection::default(),
+            project_root.path(),
+            vec![],
+            Some(vec![client_stdio_mcp("zed-mcp")]),
+            None,
+        )
+        .unwrap();
+
+        let ExtensionConfig::Stdio { name, envs, .. } = &extensions[0] else {
+            panic!("expected stdio extension");
+        };
+        assert_eq!(name, "zed-mcp");
+        assert!(envs.get_env().is_empty());
+    }
+
+    #[test]
+    fn client_selection_rejects_inline_env_values_for_unknown_extensions() {
+        let (config, _c, _s) = developer_enabled_config();
+        let mut extension = client_stdio_mcp("zed-mcp");
+        let GooseExtension::Mcp { server, .. } = &mut extension else {
+            panic!("expected mcp extension");
+        };
+        let McpServer::Stdio(stdio) = server.as_mut() else {
+            panic!("expected stdio server");
+        };
+        stdio.env = vec![EnvVariable::new(
+            "SPLUNK_URL",
+            "https://splunk.nonprod.example.com",
+        )];
+
+        let error = extension_config_from_client(&config, extension)
+            .expect_err("inline env values should be rejected");
+        assert!(error
+            .to_string()
+            .contains("env values must be passed via envKeys"));
     }
 
     #[test]
