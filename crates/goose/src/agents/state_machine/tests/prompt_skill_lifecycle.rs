@@ -5,12 +5,6 @@ use super::calculator_extension::ADD;
 use super::pipeline::{
     test_pipeline, MessageKind::Agent, MessageKind::ToolResponse, MessageKind::User,
 };
-#[cfg(feature = "code-mode")]
-use crate::config::permission::PermissionLevel;
-#[cfg(feature = "code-mode")]
-use crate::config::GooseMode;
-#[cfg(feature = "code-mode")]
-use crate::conversation::message::MessageContent;
 
 #[tokio::test]
 async fn prompt_and_skill_lifecycle() -> Result<()> {
@@ -139,7 +133,7 @@ async fn builtin_commands_win_over_skills_and_recipes() -> Result<()> {
 
 #[cfg(feature = "code-mode")]
 #[tokio::test]
-async fn unadvertised_load_skill_is_not_confirmed_or_loaded() -> Result<()> {
+async fn code_mode_keeps_load_skill_advertised_and_loadable() -> Result<()> {
     let (pipeline, api) = test_pipeline().await?;
     let skill_dir = pipeline.working_dir().join(".agents/skills/private");
     std::fs::create_dir_all(&skill_dir)?;
@@ -149,24 +143,14 @@ async fn unadvertised_load_skill_is_not_confirmed_or_loaded() -> Result<()> {
     )?;
 
     pipeline.add_extension("code_execution").await?;
-    pipeline.set_permission("load_skill", PermissionLevel::AlwaysAllow);
-    let pipeline = pipeline.with_goose_mode(GooseMode::Approve).await;
-    api.on("try the hidden skill")
-        .unadvertised_call("load_skill", json!({ "name": "private" }));
-    api.on("not available").reply("skill call blocked");
+    api.on("load the skill")
+        .call("load_skill", json!({ "name": "private" }));
+    api.on("PRIVATE_SKILL_CONTENT").reply("skill loaded");
 
-    let result = pipeline.run(["try the hidden skill"]).await?;
+    let result = pipeline.run(["load the skill"]).await?;
 
-    assert!(!api.calls()[0].advertises_tool("load_skill"));
-    assert!(!api.calls()[1].input_contains("PRIVATE_SKILL_CONTENT"));
-    result.assert_message(-2, ToolResponse, "Tool 'load_skill' is not available");
-    result.assert_message(-1, Agent, "skill call blocked");
-    assert!(!result.conversation().messages().iter().any(|message| {
-        message
-            .content
-            .iter()
-            .any(|content| matches!(content, MessageContent::ActionRequired(_)))
-    }));
+    assert!(api.calls()[0].advertises_tool("load_skill"));
+    result.assert_message(-1, Agent, "skill loaded");
 
     Ok(())
 }

@@ -1,6 +1,8 @@
 use anyhow::Result;
 use serde_json::json;
 
+#[cfg(feature = "code-mode")]
+use super::calculator_extension::{value, ADD};
 #[cfg(feature = "scheduler")]
 use super::dummy_api::DummyApi;
 use super::dummy_api::ProviderFeatures;
@@ -16,8 +18,12 @@ use crate::agents::final_output_tool::{FINAL_OUTPUT_CONTINUATION_MESSAGE, FINAL_
 use crate::agents::platform_extensions::scheduler::MANAGE_SCHEDULE_TOOL_NAME_COMPLETE;
 use crate::agents::tool_execution::CHAT_MODE_TOOL_SKIPPED_RESPONSE;
 use crate::agents::types::{RetryConfig, SuccessCheck};
+#[cfg(feature = "code-mode")]
+use crate::config::permission::PermissionLevel;
 use crate::config::GooseMode;
 use crate::conversation::message::Message;
+#[cfg(feature = "code-mode")]
+use crate::conversation::message::MessageContent;
 #[cfg(feature = "tree-sitter")]
 use crate::recipe::build_recipe::build_recipe_from_template;
 use crate::recipe::{Recipe, Response, SubRecipe};
@@ -527,6 +533,50 @@ async fn code_mode_advertises_and_accepts_final_output() -> Result<()> {
     assert!(api.calls()[0].system_contains("You MUST use the `final_output` tool"));
     assert!(api.calls()[0].advertises_tool(FINAL_OUTPUT_TOOL_NAME));
     result.assert_message(-1, Agent, r#"{"result":"42"}"#);
+
+    Ok(())
+}
+
+#[cfg(feature = "code-mode")]
+#[tokio::test]
+async fn unadvertised_extension_tools_are_neither_approved_nor_executed() -> Result<()> {
+    let (pipeline, api) = test_pipeline().await?;
+    pipeline.add_extension("code_execution").await?;
+    pipeline.set_permission(ADD, PermissionLevel::AlwaysAllow);
+    let pipeline = pipeline
+        .with_max_turns(2)
+        .with_goose_mode(GooseMode::Approve)
+        .await;
+    api.on("try the hidden calculator")
+        .unadvertised_call(ADD, value(2));
+    api.on("not available").reply("calculator call blocked");
+
+    let result = pipeline.run(["try the hidden calculator"]).await?;
+
+    assert!(!api.calls()[0].advertises_tool(ADD));
+    assert!(result.conversation().messages().iter().any(|message| {
+        message.content.iter().any(|content| {
+            matches!(content, MessageContent::ToolResponse(response)
+            if response.tool_result.as_ref().is_ok_and(|result| {
+                result.content.iter().any(|content| {
+                    content.as_text().is_some_and(|text| {
+                        text.text.contains("Tool 'calculator__add' is not available")
+                    })
+                })
+            }))
+        })
+    }));
+    assert!(result.conversation().messages().iter().any(|message| {
+        message.content.iter().any(|content| {
+            matches!(content, MessageContent::Text(text) if text.text == "calculator call blocked")
+        })
+    }));
+    assert!(!result.conversation().messages().iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|content| matches!(content, MessageContent::ActionRequired(_)))
+    }));
 
     Ok(())
 }
