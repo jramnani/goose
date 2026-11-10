@@ -487,6 +487,8 @@ mod tests {
             refresh_interval: 3600,
             timeout_seconds: None,
             cwd: None,
+            header_name: None,
+            header_value_prefix: None,
         });
 
         HuggingFaceProvider::from_custom_config(config, None).unwrap();

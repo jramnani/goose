@@ -145,6 +145,16 @@ pub struct AuthConfig {
     /// path is resolved against. Defaults to goose's current directory.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// HTTP header that carries the credential. Defaults to the header the
+    /// provider engine normally uses (`Authorization` for OpenAI-style
+    /// engines, `x-api-key` for Anthropic).
+    #[serde(default)]
+    pub header_name: Option<String>,
+    /// Text placed before the credential in the header value, including any
+    /// trailing space (e.g. `"Bearer "`). Defaults to the engine's usual
+    /// prefix; set to `""` to send the bare credential.
+    #[serde(default)]
+    pub header_value_prefix: Option<String>,
 }
 
 fn default_refresh_interval() -> u64 {

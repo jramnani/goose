@@ -36,10 +36,13 @@ pub struct CommandAuthProvider {
 }
 
 impl CommandAuthProvider {
+    /// `default_header_name` and `default_header_value_prefix` are the values
+    /// the provider engine normally uses; `auth_config.header_name` and
+    /// `auth_config.header_value_prefix` take precedence when set.
     pub fn new(
         auth_config: &AuthConfig,
-        header_name: impl Into<String>,
-        header_value_prefix: impl Into<String>,
+        default_header_name: impl Into<String>,
+        default_header_value_prefix: impl Into<String>,
     ) -> Self {
         // Made absolute up front: `cwd` doubles as both `current_dir` for the
         // spawned process and the join base in `resolve_program`, and a
@@ -69,8 +72,14 @@ impl CommandAuthProvider {
                 .map(Duration::from_secs)
                 .unwrap_or(DEFAULT_AUTH_COMMAND_TIMEOUT),
             cwd,
-            header_name: header_name.into(),
-            header_value_prefix: header_value_prefix.into(),
+            header_name: auth_config
+                .header_name
+                .clone()
+                .unwrap_or_else(|| default_header_name.into()),
+            header_value_prefix: auth_config
+                .header_value_prefix
+                .clone()
+                .unwrap_or_else(|| default_header_value_prefix.into()),
             cached: Arc::new(RwLock::new(None)),
         }
     }
@@ -248,6 +257,8 @@ mod tests {
             refresh_interval,
             timeout_seconds: None,
             cwd: None,
+            header_name: None,
+            header_value_prefix: None,
         }
     }
 
@@ -316,6 +327,42 @@ mod tests {
         let (_, second) = provider.get_auth_header().await.unwrap();
 
         assert_eq!(first, second);
+    }
+
+    #[tokio::test]
+    async fn uses_engine_defaults_when_config_does_not_set_header() {
+        let provider =
+            CommandAuthProvider::new(&auth_config("echo", vec!["abc"], 3600), "x-api-key", "");
+
+        let (header_name, header_value) = provider.get_auth_header().await.unwrap();
+
+        assert_eq!(header_name, "x-api-key");
+        assert_eq!(header_value, "abc");
+    }
+
+    #[tokio::test]
+    async fn config_header_name_and_prefix_override_engine_defaults() {
+        let mut config = auth_config("echo", vec!["abc"], 3600);
+        config.header_name = Some("Authorization".to_string());
+        config.header_value_prefix = Some("Bearer ".to_string());
+        let provider = CommandAuthProvider::new(&config, "x-api-key", "");
+
+        let (header_name, header_value) = provider.get_auth_header().await.unwrap();
+
+        assert_eq!(header_name, "Authorization");
+        assert_eq!(header_value, "Bearer abc");
+    }
+
+    #[tokio::test]
+    async fn empty_config_prefix_overrides_engine_default_prefix() {
+        let mut config = auth_config("echo", vec!["abc"], 3600);
+        config.header_value_prefix = Some(String::new());
+        let provider = CommandAuthProvider::new(&config, "Authorization", "Bearer ");
+
+        let (header_name, header_value) = provider.get_auth_header().await.unwrap();
+
+        assert_eq!(header_name, "Authorization");
+        assert_eq!(header_value, "abc");
     }
 
     #[tokio::test]

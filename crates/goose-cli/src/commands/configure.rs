@@ -2285,6 +2285,8 @@ fn add_provider() -> anyhow::Result<()> {
                 refresh_interval,
                 timeout_seconds: None,
                 cwd: None,
+                header_name: None,
+                header_value_prefix: None,
             });
         } else {
             api_key = cliclack::password("API key:").mask('▪').interact()?;

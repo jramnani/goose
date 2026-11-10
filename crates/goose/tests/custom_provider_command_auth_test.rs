@@ -5,7 +5,7 @@
 
 use goose::conversation::message::Message;
 use goose::providers::base::Provider;
-use goose::providers::openai_def;
+use goose::providers::{anthropic_def, openai_def};
 use goose_providers::declarative::{AuthConfig, DeclarativeProviderConfig, ProviderEngine};
 use goose_providers::model::ModelConfig;
 use serde_json::json;
@@ -113,6 +113,8 @@ async fn command_auth_credential_is_sent_as_bearer_token() {
             refresh_interval: 3600,
             timeout_seconds: None,
             cwd: None,
+            header_name: None,
+            header_value_prefix: None,
         },
     );
     let provider = openai_def::from_custom_config(config, None).unwrap();
@@ -168,6 +170,8 @@ async fn command_auth_refreshes_credential_on_401_and_retries() {
             refresh_interval: 3600,
             timeout_seconds: None,
             cwd: None,
+            header_name: None,
+            header_value_prefix: None,
         },
     );
     let provider = openai_def::from_custom_config(config, None).unwrap();
@@ -181,5 +185,113 @@ async fn command_auth_refreshes_credential_on_401_and_retries() {
     assert_ne!(
         captured[0], captured[1],
         "the retried request should carry a freshly-fetched credential, not the stale one"
+    );
+}
+
+fn anthropic_messages_sse() -> String {
+    [
+        r#"data: {"type":"message_start","message":{"id":"msg_1","role":"assistant","content":[],"model":"test-model","usage":{"input_tokens":1,"output_tokens":0}}}"#,
+        r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+        r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#,
+        r#"data: {"type":"content_block_stop","index":0}"#,
+        r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}"#,
+        r#"data: {"type":"message_stop"}"#,
+    ]
+    .join("\n\n")
+        + "\n\n"
+}
+
+#[derive(Debug, PartialEq)]
+struct CapturedCredentialHeaders {
+    x_api_key: Option<String>,
+    authorization: Option<String>,
+}
+
+/// Mounts a `/v1/messages` endpoint and returns the credential headers of
+/// each request it receives.
+async fn mount_anthropic_messages_endpoint(
+    server: &MockServer,
+) -> Arc<Mutex<Vec<CapturedCredentialHeaders>>> {
+    let captured_headers: Arc<Mutex<Vec<CapturedCredentialHeaders>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let capture = captured_headers.clone();
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(move |req: &Request| {
+            let header_value = |name: &str| {
+                req.headers
+                    .get(name)
+                    .map(|value| value.to_str().unwrap().to_string())
+            };
+            capture.lock().unwrap().push(CapturedCredentialHeaders {
+                x_api_key: header_value("x-api-key"),
+                authorization: header_value("authorization"),
+            });
+            ResponseTemplate::new(200)
+                .set_body_string(anthropic_messages_sse())
+                .insert_header("content-type", "text/event-stream")
+        })
+        .mount(server)
+        .await;
+
+    captured_headers
+}
+
+fn anthropic_config_with_auth(base_url: &str, auth: AuthConfig) -> DeclarativeProviderConfig {
+    DeclarativeProviderConfig {
+        engine: ProviderEngine::Anthropic,
+        ..custom_config_with_auth(base_url, auth)
+    }
+}
+
+fn echo_auth_config(header_name: Option<&str>, header_value_prefix: Option<&str>) -> AuthConfig {
+    AuthConfig {
+        command: "echo".to_string(),
+        args: vec!["test-token-123".to_string()],
+        refresh_interval: 3600,
+        timeout_seconds: None,
+        cwd: None,
+        header_name: header_name.map(str::to_string),
+        header_value_prefix: header_value_prefix.map(str::to_string),
+    }
+}
+
+#[tokio::test]
+async fn anthropic_command_auth_sends_x_api_key_by_default() {
+    let server = MockServer::start().await;
+    let captured_headers = mount_anthropic_messages_endpoint(&server).await;
+    let config = anthropic_config_with_auth(&server.uri(), echo_auth_config(None, None));
+    let provider = anthropic_def::from_custom_config(config, None).unwrap();
+
+    complete(&provider).await.unwrap();
+
+    assert_eq!(
+        captured_headers.lock().unwrap().as_slice(),
+        [CapturedCredentialHeaders {
+            x_api_key: Some("test-token-123".to_string()),
+            authorization: None,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn anthropic_command_auth_honors_configured_bearer_header() {
+    let server = MockServer::start().await;
+    let captured_headers = mount_anthropic_messages_endpoint(&server).await;
+    let config = anthropic_config_with_auth(
+        &server.uri(),
+        echo_auth_config(Some("Authorization"), Some("Bearer ")),
+    );
+    let provider = anthropic_def::from_custom_config(config, None).unwrap();
+
+    complete(&provider).await.unwrap();
+
+    assert_eq!(
+        captured_headers.lock().unwrap().as_slice(),
+        [CapturedCredentialHeaders {
+            x_api_key: None,
+            authorization: Some("Bearer test-token-123".to_string()),
+        }]
     );
 }

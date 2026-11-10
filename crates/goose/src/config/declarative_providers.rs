@@ -713,6 +713,8 @@ mod tests {
             refresh_interval: 3600,
             timeout_seconds: None,
             cwd: None,
+            header_name: None,
+            header_value_prefix: None,
         });
 
         assert!(huggingface_declarative_inventory_configured_from_sources(
